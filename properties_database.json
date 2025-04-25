@@ -1,0 +1,80 @@
+{
+    "species_properties": {
+      "columns": ["Mw", "Tc", "Pc", "omega", 
+            "wilke_C1", "wilke_C2", "wilke_C3", "wilke_C4", 
+            "therm_cond_C1", "therm_cond_C2", "therm_cond_C3", "therm_cond_C4",
+            "c_p_C1", "c_p_C2", "c_p_C3", "c_p_C4", "c_p_C5", "dH_f"],
+      "data": {
+        "H2": {
+          "Mw": 0.002015,
+          "Tc": 33.19,
+          "Pc": 1313000.0,
+          "omega": -0.215993,
+          "wilke_C1": 1.797E-7,
+          "wilke_C2": 0.685,
+          "wilke_C3": -0.59,
+          "wilke_C4": 140.0,
+          "therm_cond_C1": 0.002653, 
+          "therm_cond_C2": 0.7452,
+          "therm_cond_C3": 12.0, 
+          "therm_cond_C4": 0.0,
+          "c_p_C1": 0.27617e5, 
+          "c_p_C2": 0.09560e5, 
+          "c_p_C3": 2.466e3, 
+          "c_p_C4": 0.0376e5, 
+          "c_p_C5": 567.6,
+          "dH_f": 0.0
+        },
+        "N2": {
+          "Mw": 0.028,
+          "Tc": 126.2,
+          "Pc": 3400000.0,
+          "omega": 0.0377215,
+          "wilke_C1": 6.5592E-7,
+          "wilke_C2": 0.6081,
+          "wilke_C3": 54.714,
+          "wilke_C4": 0.0,
+          "therm_cond_C1": 0.00033143, 
+          "therm_cond_C2": 0.7722, 
+          "therm_cond_C3": 16.323,
+          "therm_cond_C4": 373.72,
+          "c_p_C1": 0.29105e5, 
+          "c_p_C2": 0.08615e5, 
+          "c_p_C3": 1.70160e3, 
+          "c_p_C4": 0.00103e5, 
+          "c_p_C5": 909.79,
+          "dH_f": 0.0
+        },
+        "NH3": {
+          "Mw": 0.017021,
+          "Tc": 405.65,
+          "Pc": 11280000.0,
+          "omega": 0.252608,
+          "wilke_C1": 4.1855E-8,
+          "wilke_C2": 0.9806,
+          "wilke_C3": 30.8,
+          "wilke_C4": 0.0,
+          "therm_cond_C1": 9.6608E-06,
+          "therm_cond_C2": 1.3799,
+          "therm_cond_C3": 0.0,
+          "therm_cond_C4": 0.0,
+          "c_p_C1": 0.33427e5, 
+          "c_p_C2": 0.4898e5, 
+          "c_p_C3": 2.036e3, 
+          "c_p_C4": 0.2256e5, 
+          "c_p_C5": 882.0,
+          "dH_f": -46.12e3
+        }
+      }
+    },
+    "binary_properties": {
+      "columns": ["wilke_kij", "Dij"],
+      "data": {
+        "H2/N2": {"wilke_kij": 0.6495, "Dij": 6.570e-5},
+        "H2/NH3": {"wilke_kij": 0.8328, "Dij": 7.807e-5},
+        "N2/NH3": {"wilke_kij": 0.5536, "Dij": 2.402e-5}
+      }
+    }
+}
+  
+  
