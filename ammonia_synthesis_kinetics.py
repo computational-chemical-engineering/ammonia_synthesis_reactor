@@ -91,7 +91,7 @@ class AmmoniaSynthesisKinetics:
             A small constant to avoid division by zero. Defaults to 1e-6.
         """
         self.rate_constant = None
-        self.Rc = 1.9872
+        self.Rc = constants.R/constants.calorie  # Universal gas constant in cal/(mol·K)
         self.Ra = constants.R
         self.axis = axis
         self.c_small = c_small
@@ -196,8 +196,8 @@ class AmmoniaSynthesisKinetics:
         tuple
             Adsorption constants for H2 and NH3.
         """
-        self.K_H2 = np.exp(-56.9024 / self.Ra + 37656 / (self.Ra * T))
-        self.K_NH3 = np.exp(-34.7272 / self.Ra + 29228 / (self.Ra * T))
+        self.K_H2 = np.exp(-13.6 / self.Rc + 9000.0 / (self.Rc * T))
+        self.K_NH3 = np.exp(-8.3 / self.Rc + 7000.0 / (self.Rc * T))
         return self.K_H2, self.K_NH3
 
     def compute_fugacity_coeffs(self, T, p):
@@ -219,7 +219,7 @@ class AmmoniaSynthesisKinetics:
         ndim = max(T.ndim, p.ndim, self.axis)+1
         axis = self.axis if self.axis >= 0 else ndim + self.axis
         T_loc = T.reshape(T.shape + (1,) * (ndim -1 - T.ndim))
-        p_loc = p.reshape(p.shape + (1,) * (ndim -1 - p.ndim))
+        p_loc = 1e-5*p.reshape(p.shape + (1,) * (ndim -1 - p.ndim)) # local pressures in bar
         shape = tuple([max(s1, s2) for s1, s2 in zip(T_loc.shape, p_loc.shape)]) + (3,)
         self.fugacity_coeffs = np.empty(shape)
         slices = [slice(None)] * ndim
@@ -233,36 +233,34 @@ class AmmoniaSynthesisKinetics:
         self.fugacity_coeffs[tuple(slices)] = 0.1438996 + 0.2028538e-2 * T_loc - 0.4487672e-3 * p_loc - 0.1142945e-5 * T_loc ** 2 + 0.2761216e-6 * p_loc ** 2
         return self.fugacity_coeffs
 
-    def __call__(self, c, T=None, p=None):
+    def __call__(self, p_partial, T=None):
         """
         Compute the reaction rates for ammonia synthesis.
 
         Parameters:
         -----------
-        c : numpy.ndarray
-            Concentration array.
+        p_partial : numpy.ndarray
+            Partial pressures [Pa]
         T : numpy.ndarray, optional
             Temperature array. Defaults to None.
-        p : numpy.ndarray, optional
-            Pressure array. Defaults to None.
 
         Returns:
         --------
         numpy.ndarray
-            Reaction rates for ammonia synthesis.
+            Reaction rates for ammonia synthesis. [mol/m3]
         """
+        #slices = [slice(None)] * c.ndim
+        #slices[self.axis] = [self.index_H2, self.index_N2, self.index_NH3]
+        p_loc = np.take(p_partial, (self.index_H2, self.index_N2, self.index_NH3), axis=self.axis)
+        p = np.sum(p_loc, axis=self.axis)
         self.set_T_and_p(T, p)
-        slices = [slice(None)] * c.ndim
-        slices[self.axis] = [self.index_H2, self.index_N2, self.index_NH3]
-        c_species = np.take(c, (self.index_H2, self.index_N2, self.index_NH3), axis=self.axis)
-        p_partial = np.expand_dims(self.p, self.axis) * c_species / np.sum(c, axis=self.axis, keepdims=True)
 
-        activities = p_partial * self.fugacity_coeffs
+        activities = 1e-5*p_loc * self.fugacity_coeffs
         a_H2 = np.take(activities, 0, axis=self.axis)
         a_N2 = np.take(activities, 1, axis=self.axis)
         a_NH3 = np.take(activities, 2, axis=self.axis)
         rate = self.rate_constant * (self.pow(a_N2, 0.5) * self.pow(a_H2, 0.375) / (self.pow(self.c_small + np.abs(a_NH3), 0.25)) - (1.0 / self.K_eq) * self.pow(a_NH3, 0.75) / self.pow(self.c_small + np.abs(a_H2), 1.125)) / (1 + self.K_H2 * self.pow(a_H2, 0.3) + self.K_NH3 * self.pow(a_NH3, 0.2))
-        shape = [1] * c.ndim
+        shape = [1] * p_partial.ndim
         shape[self.axis] = -1
         rates = np.expand_dims(rate, self.axis) * self.stoichiometry.reshape(shape)
         return rates
