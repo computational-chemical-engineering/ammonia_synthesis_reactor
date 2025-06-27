@@ -167,21 +167,44 @@ class GasMixtureCorrelations:
         p_t = p.reshape(shapes_t[1])
         Tc_t = self.Tc.reshape((1, -1, 1))
         
-        y_sqrt_ai = y_t*self.aip_sqrt*np.abs(1.0 + self.mi*(1.0 - np.sqrt(T_t/Tc_t)))
-        y_sqrt_ai_j = np.expand_dims(y_sqrt_ai, axis=1)
-        a = np.sum(y_sqrt_ai*np.sum((1.0-self.wilke_kij)*y_sqrt_ai_j, axis=2), axis=1, keepdims=True)
-        b = np.sum(y_t*self.bi, axis=1, keepdims=True)
+        #y_sqrt_ai = y_t*self.aip_sqrt*np.abs(1.0 + self.mi*(1.0 - np.sqrt(T_t/Tc_t)))
+        #y_sqrt_ai_j = np.expand_dims(y_sqrt_ai, axis=1)
+        #a = np.sum(y_sqrt_ai*np.sum((1.0-self.wilke_kij)*y_sqrt_ai_j, axis=2), axis=1, keepdims=True)
+        #b = np.sum(y_t*self.bi, axis=1, keepdims=True)
         R = constants.R
-        A = (a * p_t) / ((R * T_t)**2)
-        B = (b * p_t) / (R * T_t)
-        coeffs = np.stack([-((A - B - B**2) * B), A - 2 * B - 3 * B**2, -(1 - B), np.ones_like(B)],axis=-1)
-        roots = compute_roots(coeffs)
-        roots = np.real_if_close(roots, tol=1e-6)
-        real_roots = np.where(np.isreal(roots), np.real(roots), -np.inf)
-        Z = np.max(real_roots, axis=-1)
-        c = p_t / (R * T_t * Z)
+        #A = (a * p_t) / ((R * T_t)**2)
+        #B = (b * p_t) / (R * T_t)
+        #coeffs = np.stack([-((A - B - B**2) * B), A - 2 * B - 3 * B**2, -(1 - B), np.ones_like(B)],axis=-1)
+        #roots = compute_roots(coeffs)
+        #roots = np.real_if_close(roots, tol=1e-6)
+        #real_roots = np.where(np.isreal(roots), np.real(roots), -np.inf)
+        #Z = np.max(real_roots, axis=-1)
+        #c = p_t / (R * T_t * Z)
+        c = p_t / (R * T_t)  # Initial molar density without compressibility factor
         return c.reshape(shape_out)
-       
+    
+    def molecular_weight(self, y, axis=-1):
+        """
+        Compute the molecular weight of a gas mixture.
+
+        Parameters:
+        -----------
+        y : numpy.ndarray
+            Mole fraction array of each species.
+        axis : int, optional
+            The axis corresponding to the species index in `y`. Defaults to `-1` (last axis).
+
+        Returns:
+        --------
+        numpy.ndarray
+            Molecular weight of the gas mixture.
+
+        """
+        shape_Mw = [1]*y.ndim
+        shape_Mw[axis] = self.num_species
+        Mw = np.sum(y * self.Mw.reshape(shape_Mw), axis=axis)/np.sum(y, axis=axis)
+        return Mw
+    
     def density(self, y, T, p, axis=-1):
         """
         Compute the density of a gas mixture using the Peng-Robinson (PR) equation of state.
@@ -204,9 +227,7 @@ class GasMixtureCorrelations:
 
         """
         c = self.molar_density(y, T, p, axis)
-        shape_Mw = [1]*len(y.shape)
-        shape_Mw[axis] = self.num_species
-        Mw = np.sum(y * self.Mw.reshape(shape_Mw), axis=axis)/np.sum(y, axis=axis)
+        Mw = self.molecular_weight(y, axis)
         rho = c*Mw
         return rho
     
@@ -512,7 +533,7 @@ def compute_roots(coeffs):
     for index in np.ndindex(shape):  # Loop over all indices except last axis
         poly_coeffs = coeffs[index]  # Extract 1D polynomial
         poly_roots = np.polynomial.polynomial.polyroots(poly_coeffs)
-        roots[index, :] = poly_roots  # Store roots, pad with NaN if needed
+        roots[index] = poly_roots  # Store roots, pad with NaN if needed
 
     return roots
 

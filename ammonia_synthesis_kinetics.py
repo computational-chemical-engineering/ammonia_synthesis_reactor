@@ -44,7 +44,7 @@ class AmmoniaSynthesisKinetics:
 
     Methods:
     --------
-    __init__(self, species=["H2", "N2", "NH3"], T=None, p=None, rho_b=None, rho_c=None, axis=-1, c_small=1e-6):
+    __init__(self, species=["H2", "N2", "NH3"], T=None, p=None, rho_b=None, rho_c=None, axis=-1, c_small=1e0):
         Initialize the class with species, temperature, pressure, and other parameters.
 
     pow(self, c, n):
@@ -259,7 +259,7 @@ class AmmoniaSynthesisKinetics:
         a_H2 = np.take(activities, 0, axis=self.axis)
         a_N2 = np.take(activities, 1, axis=self.axis)
         a_NH3 = np.take(activities, 2, axis=self.axis)
-        rate = self.rate_constant * (self.pow(a_N2, 0.5) * self.pow(a_H2, 0.375) / (self.pow(self.c_small + np.abs(a_NH3), 0.25)) - (1.0 / self.K_eq) * self.pow(a_NH3, 0.75) / self.pow(self.c_small + np.abs(a_H2), 1.125)) / (1 + self.K_H2 * self.pow(a_H2, 0.3) + self.K_NH3 * self.pow(a_NH3, 0.2))
+        rate = self.rate_constant * (self.pow(a_N2, 0.5) * self.pow(a_H2, 0.375) / (self.c_small + np.maximum(a_NH3, 0.0))**0.25 - (1.0 / self.K_eq) * self.pow(a_NH3, 0.75) / (self.c_small + np.maximum(a_H2,0.0))**1.125) / (1.0 + self.K_H2 * np.abs(a_H2)**0.3 + self.K_NH3 * np.abs(a_NH3)**0.2)
         shape = [1] * p_partial.ndim
         shape[self.axis] = -1
         rates = np.expand_dims(rate, self.axis) * self.stoichiometry.reshape(shape)
