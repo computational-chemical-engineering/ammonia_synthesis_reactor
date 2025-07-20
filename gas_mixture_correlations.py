@@ -202,7 +202,7 @@ class GasMixtureCorrelations:
         """
         shape_Mw = [1]*y.ndim
         shape_Mw[axis] = self.num_species
-        Mw = np.sum(y * self.Mw.reshape(shape_Mw), axis=axis)/np.sum(y, axis=axis)
+        Mw = np.sum(y * self.Mw.reshape(shape_Mw), axis=axis)/np.sum(y+1e-13, axis=axis)
         return Mw
     
     def density(self, y, T, p, axis=-1):
