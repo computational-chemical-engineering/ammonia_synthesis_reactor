@@ -162,7 +162,8 @@ class AmmoniaSynthesisKinetics:
         numpy.ndarray
             Equilibrium constant array.
         """
-        self.K_eq = T ** (-2.691122) * 10 ** (-5.519265e-5 * T + 1.848863e-7 * T ** 2 + 2001.6 / T + 2.6899)
+        #self.K_eq = T**(-2.691122) * 10**(-5.519265e-5 * T + 1.848863e-7 * T**2 + 2001.6 / T + 2.6899)
+        self.K_eq = np.exp(-2.691122 * np.log(T) + np.log(10.0)*((-5.519265e-5 + 1.848863e-7 * T) * T + 2001.6 / T + 2.6899))
         return self.K_eq
 
     def compute_kinetic_constant(self, T):
@@ -255,7 +256,7 @@ class AmmoniaSynthesisKinetics:
         p = np.sum(p_loc, axis=self.axis)
         self.set_T_and_p(T, p)
 
-        activities = 1e-5*p_loc * self.fugacity_coeffs
+        activities = 1e-5*p_loc * self.fugacity_coeffs 
         a_H2 = np.take(activities, 0, axis=self.axis)
         a_N2 = np.take(activities, 1, axis=self.axis)
         a_NH3 = np.take(activities, 2, axis=self.axis)

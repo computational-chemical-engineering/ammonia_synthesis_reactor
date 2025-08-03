@@ -380,7 +380,7 @@ class GasMixtureCorrelations:
         Returns:
         --------
         numpy.ndarray
-            Specific heat capacity of each species (J/kg·K).
+            Specific heat capacity of each species (J/mol·K).
         """
         T = np.asarray(T)
         shape_t_T, shape_out, _ = get_tri_shapes(shapes_nonspecies = T.shape, axis=axis)
@@ -395,32 +395,32 @@ class GasMixtureCorrelations:
         c_p = c_p_spline(T_t.ravel()).reshape((shape_t_T[0], shape_t_T[2], self.num_species))
         c_p = np.permute_dims(c_p, (0,2,1)).reshape(shape_out)
         return c_p
-    
-    def specific_heat(self, y, T, axis=-1):
+
+    def specific_heat(self, c, T, axis=-1):
         """
         Compute the specific heat capacity of the gas mixture.
 
         Parameters:
         -----------
-        y : numpy.ndarray
-            Mole fraction array of each species.
+        c : numpy.ndarray
+            Molar concentration of each species.
         T : numpy.ndarray
             Temperature array.
         axis : int, optional
-            The axis corresponding to the species index in `y`. Defaults to `-1` (last axis).
+            The axis corresponding to the species index in `c`. Defaults to `-1` (last axis).
 
         Returns:
         --------
         numpy.ndarray
-            Specific heat capacity of the gas mixture (J/kg·K).
+            Specific heat capacity of the gas mixture (J/m^3·K).
         """    
-        y = np.asarray(y)
+        c = np.asarray(c)
         T = np.asarray(T)
-        shape_t_y, shape_t_T, _, shape_out = get_tri_shapes(shapes_species = y.shape, shapes_nonspecies = T.shape, axis=axis)
-        y_t = y.reshape(shape_t_y)
+        shape_t_c, shape_t_T, _, shape_out = get_tri_shapes(shapes_species = c.shape, shapes_nonspecies = T.shape, axis=axis)
+        c_t = c.reshape(shape_t_c)
         T_t = T.reshape(shape_t_T)
-        c_p_s = self.species_specific_heat(T, axis=axis).reshape((shape_t_T[0],self.num_species,shape_t_T[2]))
-        c_p_mix = np.sum(y_t * c_p_s, axis=1)
+        c_p_s = self.species_specific_heat(T_t, axis=axis).reshape((shape_t_T[0],self.num_species,shape_t_T[2]))
+        c_p_mix = np.sum(c_t * c_p_s, axis=1)
         return c_p_mix.reshape(shape_out)
     
     def species_enthalpies(self, T, T_ref = 298.15, dT= 5.0, axis=-1):

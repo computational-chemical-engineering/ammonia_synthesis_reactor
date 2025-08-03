@@ -163,10 +163,10 @@ class MembraneReactor:
         self.jac_T_accum = construct_coefficient_matrix(1.0 / self.dt, shape_p)
         self.grad_T_perm_ax, self.grad_bc_T_perm_ax   = construct_grad(shape_p_perm, self.z_f, self.z_c, bc=(bc_dirichlet, bc_neumann_hom), axis=0)
         self.grad_bc_T_perm_ax *= self.T_perm_in
-        self.grad_T_perm_rad, self.grad_bc_T_perm_rad = construct_grad(shape_p_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_dirichlet), axis=1)
+        self.grad_T_perm_rad, _, self.grad_bc_T_perm_rad = construct_grad(shape_p_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_dirichlet), axis=1, shapes_d = (None, (self.num_z, 1)))
         self.grad_T_ret_ax, self.grad_bc_T_ret_ax   = construct_grad(shape_p_ret, self.z_f, self.z_c, bc_T_ret_ax, axis=0)
         self.grad_bc_T_ret_ax *= self.T_ret_in
-        self.grad_T_ret_rad, self.grad_bc_T_ret_rad = construct_grad(shape_p_ret, self.r_f_ret, self.r_c_ret, bc=(bc_dirichlet, bc_neumann_hom), axis=1)
+        self.grad_T_ret_rad, self.grad_bc_T_ret_rad, _ = construct_grad(shape_p_ret, self.r_f_ret, self.r_c_ret, bc=(bc_dirichlet, bc_neumann_hom), axis=1, shapes_d = ((self.num_z, 1), None))
         
         
         # shift retentate-side matrix indices to (later) build a monolithic spatial discretization
@@ -591,18 +591,103 @@ class MembraneReactor:
         else:
             return g, None
         
+    def construct_g_T_cond(self):
+        
+        y = self.c/np.sum(self.c, axis=-1, keepdims=True)  # Mole fractions
+        lmbda = self.correlation.thermal_conductivity(y, self.T)
+        cp = self.correlation.specific_heat(self.c, self.T)
+        
+        lmbda_perm = lmbda[:, 0:self.num_r_perm]
+        lmbda_perm_ax = interp_cntr_to_stagg(lmbda_perm, self.z_f, self.z_c, axis=0)
+        lmbda_perm_ax_mat = construct_coefficient_matrix(lmbda_perm_ax)
+        jac_T_cond = self.div_p_perm_ax @ (-lmbda_perm_ax_mat @ self.grad_T_perm_ax)
+        g_T_cond_bc = self.div_p_perm_ax @ (-lmbda_perm_ax_mat @ self.grad_bc_T_perm_ax)
+        
+        lmbda_perm_rad = interp_cntr_to_stagg(lmbda_perm, self.r_f_perm, self.r_c_perm, axis=1)
+        lmbda_perm_rad_mat = construct_coefficient_matrix(lmbda_perm_rad)
+        jac_T_cond += self.div_p_perm_rad @ (-lmbda_perm_rad_mat @ self.grad_T_perm_rad)
+        
+        lmbda_ret = lmbda[:, self.num_r_perm:]
+        lmbda_ret_ax = interp_cntr_to_stagg(lmbda_ret, self.z_f, self.z_c, axis=0)
+        lmbda_ret_ax_mat = construct_coefficient_matrix(lmbda_ret_ax)
+        jac_T_cond += self.div_p_ret_ax @ (-lmbda_ret_ax_mat @ self.grad_T_ret_ax)
+        g_T_cond_bc += self.div_p_ret_ax @ (-lmbda_ret_ax_mat @ self.grad_bc_T_ret_ax)
+        
+        lmbda_ret_rad = interp_cntr_to_stagg(lmbda_ret, self.r_f_ret, self.r_c_ret, axis=1)
+        lmbda_ret_rad_mat = construct_coefficient_matrix(lmbda_ret_rad)
+        jac_T_cond += self.div_p_ret_rad @ (-lmbda_ret_rad_mat @ self.grad_T_ret_rad)
+        
+        #heat transfer through membrane
+        
+        bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
+        T_perm = self.T[:, 0:self.num_r_perm]
+        T_ret  = self.T[:, self.num_r_perm:]
+        _, _ ,T_perm_i, _ = compute_boundary_values(T_perm, self.r_f_perm, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        T_ret_i,_,_,_ = compute_boundary_values(T_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        y_perm = y[:, 0:self.num_r_perm,:]
+        y_ret  = y[:, self.num_r_perm:,:]
+        _, _ ,y_perm_i, _ = compute_boundary_values(y_perm, self.r_f_perm, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        y_ret_i,_,_,_ = compute_boundary_values(y_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        c_perm = self.c[:, 0:self.num_r_perm,:]
+        c_ret  = self.c[:, self.num_r_perm:,:]
+        _, _ ,c_perm_i, _ = compute_boundary_values(c_perm, self.r_f_perm, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        c_ret_i,_,_,_ = compute_boundary_values(c_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        _, _ ,u_perm_ax_i, _ = compute_boundary_values(self.u_perm_ax, self.r_f_perm, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        u_perm_i = interp_stagg_to_cntr(u_perm_ax_i, self.z_f, self.z_c, axis=0)
+        u_ret_ax_i,_,_,_ = compute_boundary_values(self.u_ret_ax, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        u_ret_i = interp_stagg_to_cntr(u_ret_ax_i, self.z_f, self.z_c, axis=0)
+
+        visc_ret = self.correlation.viscosity(y_ret_i, T_ret_i)
+        rho_ret = self.correlation.molecular_weight(c_ret_i)
+        cp_ret = self.correlation.specific_heat(c_ret_i, T_ret_i)
+        Re_ret = rho_ret*self.dp*np.abs(u_ret_i)/visc_ret
+        Pr_ret = visc_ret * cp_ret / lmbda_ret_rad[:,[0]]
+        Nu_ret = self.Nu_ret(Re_ret, Pr_ret)
+        h_ret = Nu_ret*lmbda_ret_rad[:,[0]]/self.dp
+
+        d_tube = 1.0*self.r_f_perm[-1]
+        visc_perm = self.correlation.viscosity(y_perm_i, T_perm_i)
+        rho_perm = self.correlation.molecular_weight(c_perm_i)
+        cp_perm = self.correlation.specific_heat(c_perm_i, T_perm_i)
+        Re_perm = rho_perm*d_tube*np.abs(u_perm_i)/visc_perm
+        Pr_perm = visc_perm * cp_perm / lmbda_perm_rad[:,[-1]]
+        Nu_perm = self.Nu_perm(Re_perm, Pr_perm)
+        h_perm = Nu_perm*lmbda_perm_rad[:,[-1]]/d_tube
+
+        if self.nu==1:
+            resist_mem = (self.r_f_perm[-1]*np.log(self.r_f_ret[0]/self.r_f_ret[-1])) / self.lambda_mem
+            factor_geom = (self.r_f_ret[0]/self.r_f_perm[-1])
+            U = 1.0/(1.0/h_ret + resist_mem + 1.0/(factor_geom*h_perm))
+        else:
+            resist_mem = (self.r_f_perm[-1]-self.r_f_ret[0]) /  self.lambda_mem
+            U = 1.0/(1.0/h_ret + resist_mem + 1.0/h_perm)
+            factor_geom = 1.0
+
+        ic_1 = {'a':(lmbda_perm_rad[:,[-1]],0), 'b':(U,U)}
+        ic_2 = {'a':(0,factor_geom*lmbda_ret_rad[:,[0]]), 'b':(-U,U)}
+        interf_mat_perm, _, interf_mat_ret, _ = construct_interface_matrices((T_perm.shape, T_ret.shape), (self.r_f_perm, self.r_f_ret), ic=(ic_1, ic_2), axis=1)
+        jac_T_cond_ic_perm = self.div_p_perm_rad @ (-lmbda_perm_rad_mat @ self.grad_bc_T_perm_rad)
+        jac_T_cond_ic_ret = self.div_p_ret_rad @ (-lmbda_ret_rad_mat @ self.grad_bc_T_ret_rad)
+                
+        jac_T_cond += jac_T_cond_ic_perm @ interf_mat_perm + jac_T_cond_ic_ret @ interf_mat_ret
+    
+        cp_inv_mat = construct_coefficient_matrix(1.0/cp)
+        g_T_cond_bc = cp_inv_mat @ g_T_cond_bc
+        jac_T_cond = cp_inv_mat @ jac_T_cond
+        
+        return g_T_cond_bc, jac_T_cond, cp_inv_mat
+
     def construct_g_T(self, T=None, T_old=None, compute_jac=False):
         if (T is None):
             T = self.T
         if (T_old is None):
-            T_old = T.copy()
-
-        g_accum = (self.jac_T_accum @ (T-T_old).reshape((-1, 1))).reshape(T.shape)
+            T_old = T.copy()     
+        g_accum = (self.jac_T_accum @ (T-T_old).reshape((-1, 1))).reshape(T.shape)        
         g_conv, jac_conv = self.construct_g_T_conv(T, compute_jac=compute_jac)
-        #g_diff, jac_diff = self.construct_g_T_diff(T, compute_jac=compute_jac)       
+
         if (compute_jac):
             self._jac_T = self.jac_T_accum + jac_conv
-        g = g_accum + g_conv
+        g =  g_accum + g_conv
 
         return g, self._jac_T
 
@@ -618,20 +703,22 @@ class MembraneReactor:
             num_timesteps = self.num_timesteps
 
         c = self.c
+        T = self.T
         c_vec = c.ravel()
-        T_vec = self.T.ravel()
+        p_vec = self.p.ravel()
+        T_vec = T.ravel()
+        c_ret = c[:, self.num_r_perm:,:]
+        p_ret = self.p[:, self.num_r_perm:]
+        T_ret = T[:,self.num_r_perm:]
 
         i=0
         cnt_p = 0
         cnt_c = 0
         while (i < num_timesteps):
             c_old = c.copy()
-            T_old = self.T.copy()
+            T_old = T.copy()
             g_norm = np.inf
             for j in range(self.num_newton_iterations):
-                T_ret = self.T[:, self.num_r_perm:]
-                p_ret = self.p[:, self.num_r_perm:]
-                self.kinetics.set_T_and_p(T_ret, p_ret)
                 y = c/np.sum(c, axis=-1, keepdims=True)  # Mole fractions
                 k =0
                 c_tot = self.correlation.molar_density(y, self.T, self.p)
@@ -656,7 +743,6 @@ class MembraneReactor:
                     dcdp_mat = csc_array((dcdp.ravel(), row_indices.ravel(), col_ptrs.ravel()), shape=(num_rows, num_cols))
                     jac_darcy = self.construct_darcy_jacobian()
                     jac_p = self.sum_c @ jac @ dcdp_mat + jac_darcy
-                    p_vec = self.p.ravel()
                     #p_prev = p_vec.copy()
                     dp = -sla.spsolve(jac_p, g_p)
                     cnt_p += 1
@@ -664,7 +750,6 @@ class MembraneReactor:
                     #alpha = 1.0
                     #while True:
                         #clip_approach(self.p, g_p)
-                    p_ret = self.p[:, self.num_r_perm:]
                     self.kinetics.set_T_and_p(p = p_ret)
                     c_tot = self.correlation.molar_density(y, self.T, self.p)
                     c[...] = c_tot[...,np.newaxis]*y
@@ -680,6 +765,7 @@ class MembraneReactor:
                         #if (alpha < 1e-4):
                         #    raise RuntimeError(f"Line search failed to improve residual: {g_p_norm} > {g_p_norm_prev}")
                     k += 1
+                self.kinetics.set_T_and_p(p = p_ret)
                 g, jac= self.construct_g(c, c_old=c_old, c_tot = c_tot, compute_jac=True)
                 #g, jac= self.construct_g_test(c, c_old=c_old, c_tot = c_tot, compute_jac=True)
                 g_norm_prev = g_norm
@@ -689,6 +775,7 @@ class MembraneReactor:
                     g_norm_init = g_norm
                 if (g_norm < (self.rtol*g_norm_init + self.atol)) or is_stalled:
                     break
+                
                 #g_p = np.sum(g, axis=-1).reshape((-1,1))
                 #g_p_norm_prev = g_p_norm
                 #g_p_norm = np.linalg.norm(g_p.ravel())
@@ -697,6 +784,7 @@ class MembraneReactor:
                 #c_prev = c_vec.copy()
                 g_norm_prev = g_norm
                 c_vec[...] += dc
+                
                 
                 #alpha = 1.0
                 #while True:
@@ -715,9 +803,25 @@ class MembraneReactor:
             y = c/np.sum(c, axis=-1, keepdims=True)  # Mole fractions
             c_tot = self.correlation.molar_density(y, self.T, self.p)
             c[...] = c_tot[...,np.newaxis]*y
+
+            g_T_cond_bc, jac_T_cond, cp_inv_mat = self.construct_g_T_cond()
+            g_T, jac_T = self.construct_g_T(T, T_old=T_old, compute_jac=True)
+            g_T.reshape((-1,1))[...] += g_T_cond_bc + jac_T_cond @ T.reshape((-1,1))
+            jac_T += jac_T_cond
+
+            g_T_ret = g_T[:,self.num_r_perm:]
+            p_partial = self.p[:,self.num_r_perm:,np.newaxis]*c_ret/np.sum(c_ret, axis=-1, keepdims=True)
+            rates = self.kinetics(p_partial)
+            enthalpies= self.correlation.species_enthalpies(T_ret)
+            dH_react = np.sum(rates * enthalpies, axis=-1)
+            g_T_ret[...] += dH_react*cp_inv_mat.data.reshape(T.shape)[:,self.num_r_perm:]
+            dT = -sla.spsolve(jac_T, g_T.reshape((-1,1)))
+            T_vec[...] += dT
+            self.kinetics.set_T_and_p(T=T_ret)
+            
             dc_norm = np.linalg.norm((c-c_old).ravel())
             if (dc_norm < (self.rtol_dc*np.linalg.norm(c) + self.atol_dc)):
-                break
+                break # Detects convergence steady state
             i += 1
         return i, j, k, cnt_p, cnt_c
     

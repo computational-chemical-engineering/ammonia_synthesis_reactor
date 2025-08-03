@@ -31,6 +31,9 @@ DEFAULTS = {
     "Perm_NH3": 4e-7,  # NH3 permeability [mol/m²·s·Pa]
     "Sel_am_hy": 50.0,  # Selectivity NH3/H2
     "Sel_am_ni": 1000.0,  # Selectivity NH3/N2
+    "Nu_ret": (lambda Re, Pr: 0.017 * Re**0.79), # Nusselt correlation retentate side
+    "Nu_perm": (lambda Re, Pr: 0.023*Re**0.8 * Pr**0.4), # Nusselt correlation permeate side
+    "lambda_mem": 16.0, # Thermal conductivity membrane    
 
     # Reactor properties
     "Nm": 1,  # Number of membranes
@@ -64,13 +67,13 @@ DEFAULTS = {
     "T_ret_in": 273 + 380.0,  # Inlet temperature [K]
     "T_perm_in": 273 + 380.0 - 100,  # Permeate side inlet temperature [K]
     "T_ret_init": 273 + 380.0,  # Inlet temperature [K]
-    "T_perm_init": 273 + 380.0 - 100,  # Permeate side inlet temperature [K]
+    "T_perm_init": 273,  # Permeate side inlet temperature [K]
     
     # Gas concentrations
-    "y_ret_init": [0.333, 0.333, 0.333],
-    "y_perm_init": [0.333, 0.333, 0.333],
-    "y_ret_in": [0.6, 0.4, 0],  # Inlet mole fractions in retentate
-    "y_perm_in": [0.6, 0.4, 0],  # Initial mole fractions in retentate    
+    "y_ret_init": [0.3333, 0.3333, 0.3333],
+    "y_perm_init": [0.3333, 0.3333, 0.3333],
+    "y_ret_in": [0.6, 0.4, 0.0],  # Inlet mole fractions in retentate
+    "y_perm_in": [0.6, 0.4, 0.0],  # Initial mole fractions in retentate
 
 }
 
