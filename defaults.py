@@ -43,37 +43,48 @@ DEFAULTS = {
     "dp": 2.5e-4,  # Catalyst particle diameter [m]
     
     # Solver settings
-    "dt": np.inf,  # Time step size
+    "dt": 1e8,  # Time step size
     "num_timesteps": 1,  # Number of time steps
-    "num_newton_iterations": 5,  # Maximum number of inner iterations
-    "num_pressure_iterations": 2,
-    "rtol": 1e-3,  # Convergence relative tolerance for Newton's method
-    "atol": 0.0,  # Convergence absolute tolerance for Newton's method
-    "rtol_p": 1e-4,  # Relative tolerance for pressure convergence
+    "num_newton_iterations": 10,  # Maximum number of outer iterations
+    "num_pressure_iterations": 1,  # Maximum number of inner iterations in pressure solver
+    "num_concentration_iterations": 1,  # Maximum number of inner iterations in concentration solver
+    "rtol": 1e-8,  # Convergence relative tolerance for Newton's method
+    "atol": 2.0,  # Convergence absolute tolerance for Newton's method
+    "rtol_p": 0.0,  # Relative tolerance for pressure convergence
     "atol_p": 0.0,  # Absolute tolerance for pressure convergence
-    "rtol_dc": 0.0,  # Relative tolerance for determining steady state
-    "atol_dc": 0.0,  # Absolute tolerance for determining steady state
+    "rtol_c": 0.0,  # Relative tolerance for concentration convergence
+    "atol_c": 0.0,  # Absolute tolerance for concentration convergence
+    "ord_norm": 2,  # Order of norm for convergence criteria
+
+    # factor_react is the continuation factor for the reaction rate
+    # This factor is adaptively cocntrolled
+    "factor_react": 1.0,  # Reaction rate factor
+    "dfactor_react_init": 0.01,  # Initial reaction rate factor increment
+    "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
+    "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
+    "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react
     
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
     "F_perm_in": 0.02, # Inlet molar flow rate [mol/s]
-    "is_counter_current": True,  # Counter-current flow if True, co-current if False
+    "is_counter_current": False,  # Counter-current flow if True, co-current if False
     
     # Pressure settings
     "p_ret_out": 29.83e5, # Retentate side outlet pressure [Pa]
     "p_perm_out": 1e5,    # Permeate side outlet pressure [Pa]
     
     # Temperature and pressure settings
+    "is_isothermal": False,  # If True, the reactor is isothermal
     "T_ret_in": 273 + 380.0,  # Inlet temperature [K]
     "T_perm_in": 273 + 380.0 - 100,  # Permeate side inlet temperature [K]
     "T_ret_init": 273 + 380.0,  # Inlet temperature [K]
-    "T_perm_init": 273,  # Permeate side inlet temperature [K]
-    
+    "T_perm_init": 273 + 380.0 - 100,  # Permeate side inlet temperature [K]
+
     # Gas concentrations
-    "y_ret_init": [0.3333, 0.3333, 0.3333],
-    "y_perm_init": [0.3333, 0.3333, 0.3333],
-    "y_ret_in": [0.6, 0.4, 0.0],  # Inlet mole fractions in retentate
-    "y_perm_in": [0.6, 0.4, 0.0],  # Initial mole fractions in retentate
+    "y_ret_init": [0.75, 0.25, 0.0],
+    "y_perm_init": [0.0, 1.0, 0.0],
+    "y_ret_in": [0.75, 0.25, 0.0],   # Inlet mole fractions in retentate
+    "y_perm_in": [0.0, 1.0, 0.0],  # Initial mole fractions in retentate
 
 }
 
