@@ -58,8 +58,8 @@ DEFAULTS = {
 
     # factor_react is the continuation factor for the reaction rate
     # This factor is adaptively cocntrolled
-    "factor_react": 1.0,  # Reaction rate factor
-    "dfactor_react_init": 0.01,  # Initial reaction rate factor increment
+    "factor_react": 0.0,  # Reaction rate factor
+    "dfactor_react_init": 1.0,  # Initial reaction rate factor increment
     "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
     "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
     "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react

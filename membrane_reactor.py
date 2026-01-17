@@ -797,7 +797,7 @@ class MembraneReactor:
 
         return g, self._jac_T, cp_inv_mat
     
-    def solve_pressure(self, y, c_tot, c_old = None):
+    def solve_pressure(self, y, c_tot, c_old = None, verbose = 0):
         """Newton solve of pressure using species residual sum + Darcy coupling.
 
         Returns:
@@ -851,7 +851,8 @@ class MembraneReactor:
                 if (alpha_p < 1e-3):
                     success = False
                     alpha_p = 0.0
-                    warnings.warn(f"Line search failed to improve residual for pressure solver: {g_p_norm} > {g_p_norm_prev}", RuntimeWarning)
+                    if verbose > 0:
+                        warnings.warn(f"Line search failed to improve residual for pressure solver: {g_p_norm} > {g_p_norm_prev}", RuntimeWarning)
             if (g_p_norm < np.maximum(self.rtol_p * g_p_norm_init, self.atol_p)):
                 break
         return c_tot, g_norm, g_p_norm, success
@@ -887,7 +888,7 @@ class MembraneReactor:
         c[...] = c_tot[...,np.newaxis]*y
         return c_tot, success
 
-    def solve_concentration(self, y, c_tot, c_old = None):
+    def solve_concentration(self, y, c_tot, c_old = None, verbose = 0):
         """Newton/line-search solve for species concentrations.
 
         Returns:
@@ -922,7 +923,8 @@ class MembraneReactor:
                 if (alpha < 1e-3):
                     alpha = 0.0
                     success = False
-                    warnings.warn(f"Line search failed to improve residual for concentration solver: {g_norm} > {g_norm_prev}", RuntimeWarning)
+                    if verbose > 0:
+                        warnings.warn(f"Line search failed to improve residual for concentration solver: {g_norm} > {g_norm_prev}", RuntimeWarning)
                     #raise RuntimeWarning(f"Line search failed to improve residual: {g_norm} > {g_norm_prev}")
             y = c/np.sum(c, axis=-1, keepdims=True)  # Mole fractions
             c_tot = self.correlation.molar_density(y, T, p)
@@ -1142,7 +1144,7 @@ class MembraneReactor:
             eps = 1e-8
             dg_dci_data = np.zeros((num_T, num_c))
 
-    def solve_coupled(self):
+    def solve_coupled(self, vebose =0):
         # --- Initialization ---
         
         self.dt = self.ptc_dt_max  # Start with a large pseudo-time step
@@ -1160,9 +1162,11 @@ class MembraneReactor:
         print(f"Solving for factor_react = {self.factor_react:.4f} (base non-reacting case)...")
         num_iters, g_norm, g_p_norm, success = self._solve_steady_state_step()
         if not success:
-            warnings.warn(f"Failed to converge the base problem in {num_iters} iterations for factor_react = {self.factor_react:.4f}.", RuntimeWarning)
+            if verbose > 0:
+                warnings.warn(f"Failed to converge the base problem in {num_iters} iterations for factor_react = {self.factor_react:.4f}.", RuntimeWarning)
         else:
-            print(f"Converged in {num_iters} iterations.")
+            if verbose > 1:
+                print(f"Converged in {num_iters} iterations.")
 
         c_prev, p_prev, T_prev = self.c.copy(), self.p.copy(), self.T.copy()
         
@@ -1214,14 +1218,15 @@ class MembraneReactor:
                 # Decrease step size and retry from the last good point
                 dfactor_react *= self.dfactor_react_decrease
                 if dfactor_react < self.dfactor_react_min:
-                    warnings.warn(f"Continuation failed: step size below minimum at factor_react = {self.factor_react}", RuntimeWarning)
+                    if verbose > 0:
+                        warnings.warn(f"Continuation failed: step size below minimum at factor_react = {self.factor_react}", RuntimeWarning)
                     return False
                 
         print("\nContinuation successfully completed. Final solution at factor_react = 1.0 reached.")
         return True
     
     
-    def solve_fast(self):
+    def solve_fast(self, verbose = 0):
         """
         Solves the steady-state problem using an adaptive predictor-corrector
         continuation method on the reaction rate scaling factor. This is the
@@ -1240,12 +1245,16 @@ class MembraneReactor:
         # --- Step 1: Solve for factor_react = 0 (non-reacting system) ---
         factor_react_copy = self.factor_react
         self.factor_react = 0.0
-        print(f"Solving for factor_react = {self.factor_react:.4f} (base non-reacting case)...")
+        if verbose>1:
+            print(f"Solving for factor_react = {self.factor_react:.4f} (base non-reacting case)...")
         num_iters, g_norm, g_p_norm, success = self._solve_steady_state_step()
         if not success:
+            if verbose > 0:
+                print(f"Failed to converge the base problem in {num_iters} iterations for factor_react = {self.factor_react:.4f}.")
             warnings.warn(f"Failed to converge the base problem in {num_iters} iterations for factor_react = {self.factor_react:.4f}.", RuntimeWarning)
         else:
-            print(f"Converged in {num_iters} iterations.")
+            if verbose > 1:
+                print(f"Converged in {num_iters} iterations.")
         self.factor_react = factor_react_copy
 
         c_prev, p_prev, T_prev = self.c.copy(), self.p.copy(), self.T.copy()
@@ -1275,12 +1284,14 @@ class MembraneReactor:
 
             # --- Corrector Step ---
             self.factor_react = factor_react_target
-            print(f"Attempting factor_react = {self.factor_react:.4f} (step size = {dfactor_react:.4f})...")
+            if verbose > 1:
+                print(f"Attempting factor_react = {self.factor_react:.4f} (step size = {dfactor_react:.4f})...")
             num_iters, g_norm, g_p_norm, success = self._solve_steady_state_step(g_norm_init=g_norm, g_p_norm_init=g_p_norm)
 
             # --- Adapt Step Size ---
             if success:
-                print(f"SUCCESS: Converged in {num_iters} iterations (easy step). Increasing step size.")
+                if verbose > 1:
+                    print(f"SUCCESS: Converged in {num_iters} iterations (easy step). Increasing step size.")
                 # Update history for the next predictor step
                 c_prev_prev, p_prev_prev, T_prev_prev = c_prev, p_prev, T_prev
                 factor_react_prev_prev = factor_react_prev
@@ -1290,8 +1301,9 @@ class MembraneReactor:
                 # Increase step size
                 dfactor_react *= self.dfactor_react_increase
             else:
-                print(f"FAILED: Took {num_iters} iterations. Restoring state and reducing step size.")
-                
+                if verbose > 1:
+                    print(f"FAILED: Took {num_iters} iterations. Restoring state and reducing step size.")
+
                 # Restore previous successful state
                 self.c, self.p, self.T = c_prev, p_prev, T_prev
                 self.factor_react = factor_react_prev
@@ -1299,10 +1311,12 @@ class MembraneReactor:
                 # Decrease step size and retry from the last good point
                 dfactor_react *= self.dfactor_react_decrease
                 if dfactor_react < self.dfactor_react_min:
-                    warnings.warn(f"Continuation failed: step size below minimum at factor_react = {self.factor_react}", RuntimeWarning)
+                    if verbose > 0:
+                        warnings.warn(f"Continuation failed: step size below minimum at factor_react = {self.factor_react}", RuntimeWarning)
                     return False
-                
-        print("\nContinuation successfully completed. Final solution at factor_react = 1.0 reached.")
+
+        if verbose > 1:
+            print("\nContinuation successfully completed. Final solution at factor_react = 1.0 reached.")
         return True
     
 
