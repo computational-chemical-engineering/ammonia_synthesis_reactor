@@ -120,6 +120,10 @@ class MembraneReactor:
         
         self.num_r_perm = np.round(self.r_max_perm / self.r_max *self.num_r).astype('int') + 3
         self.num_r_ret = self.num_r - self.num_r_perm
+        if (self.num_r_ret < 2):
+            self.num_r_ret = 2
+            self.num_r_perm = self.num_r - self.num_r_ret
+
         self.create_spatial_discretization()
 
         # membrane permeabilities
