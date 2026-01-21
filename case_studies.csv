@@ -1,0 +1,11 @@
+Case_ID,Description,Geometry_ID,L_m,r_max_m,T_ret_K,T_perm_K,p_ret_bar,GHSV_h,H2_N2_ratio,Sweep_Ratio,Is_Counter_Current
+1_Validation_Base,Standard Base Case (Fig 4.7),Geom1,1.0,0.0165,643,593,30,150,1.5,0.2,True
+2_Ratio_Stoic,Stoichiometric Feed (Sec 5.2.3),Geom1,1.0,0.0165,643,593,30,150,3.0,0.2,True
+3_Ratio_High_N2,Nitrogen Rich Feed (Sec 5.2.3),Geom1,1.0,0.0165,643,593,30,150,0.5,0.2,True
+4_Sweep_Low,Low Sweep Ratio (Sec 5.2.5),Geom1,1.0,0.0165,643,593,30,150,1.5,0.05,True
+5_Sweep_High,High Sweep Ratio (Sec 5.2.5),Geom1,1.0,0.0165,643,593,30,150,1.5,1.0,True
+6_GHSV_Low,High Residence Time (Sec 5.2.4),Geom1,1.0,0.0165,643,593,30,50,1.5,0.2,True
+7_GHSV_High,Low Residence Time (Sec 5.2.4),Geom1,1.0,0.0165,643,593,30,500,1.5,0.2,True
+8_Geom_Narrow,Narrow Reactor (Geom 3 Sec 5.4),Geom3,1.0,0.0100,643,593,30,150,1.5,0.2,True
+9_Geom_Wide,Wide Reactor (Geom 4 Sec 5.4),Geom4,1.0,0.0510,643,593,30,150,1.5,0.2,True
+10_Cocurrent_Test,Co-current Flow Check,Geom1,1.0,0.0165,643,593,30,150,1.5,0.2,False

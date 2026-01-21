@@ -45,11 +45,11 @@ DEFAULTS = {
     # Solver settings
     "dt": 1e8,  # Time step size
     "num_timesteps": 1,  # Number of time steps
-    "num_newton_iterations": 10,  # Maximum number of outer iterations
-    "num_pressure_iterations": 1,  # Maximum number of inner iterations in pressure solver
+    "num_newton_iterations": 100,  # Maximum number of outer iterations
+    "num_pressure_iterations": 2,  # Maximum number of inner iterations in pressure solver
     "num_concentration_iterations": 1,  # Maximum number of inner iterations in concentration solver
-    "rtol": 1e-8,  # Convergence relative tolerance for Newton's method
-    "atol": 2.0,  # Convergence absolute tolerance for Newton's method
+    "rtol": 1e-4,  # Convergence relative tolerance for Newton's method
+    "atol": 0.0,  # Convergence absolute tolerance for Newton's method
     "rtol_p": 0.0,  # Relative tolerance for pressure convergence
     "atol_p": 0.0,  # Absolute tolerance for pressure convergence
     "rtol_c": 0.0,  # Relative tolerance for concentration convergence
@@ -58,11 +58,7 @@ DEFAULTS = {
 
     # factor_react is the continuation factor for the reaction rate
     # This factor is adaptively cocntrolled
-    "factor_react": 0.0,  # Reaction rate factor
-    "dfactor_react_init": 1.0,  # Initial reaction rate factor increment
-    "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
-    "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
-    "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react
+    "factor_react": 1.0,  # Reaction rate factor
     
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
