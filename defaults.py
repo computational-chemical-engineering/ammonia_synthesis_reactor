@@ -11,7 +11,7 @@ DEFAULTS = {
 
     # Grid settings
     "dim": 2,  # Number of dimensions
-    "num_r": 50,  # Number of radial grid points
+    "num_r": 30,  # Number of radial grid points
     "num_z": 100,  # Number of axial grid points
 
     # Physical constants
@@ -43,14 +43,14 @@ DEFAULTS = {
     "dp": 2.5e-4,  # Catalyst particle diameter [m]
     
     # Solver settings
-    "dt": 1e8,  # Time step size
-    "num_timesteps": 1,  # Number of time steps
-    "num_newton_iterations": 100,  # Maximum number of outer iterations
-    "num_pressure_iterations": 2,  # Maximum number of inner iterations in pressure solver
+    "dt": 1e6,  # Time step size
+    "num_timesteps": 10,  # Number of time steps / outer iterations
+    "num_newton_iterations": 10,  # Maximum number of outer iterations
+    "num_pressure_iterations": 5,  # Maximum number of inner iterations in pressure solver
     "num_concentration_iterations": 1,  # Maximum number of inner iterations in concentration solver
-    "rtol": 1e-4,  # Convergence relative tolerance for Newton's method
+    "rtol": 1e-6,  # Convergence relative tolerance for Newton's method
     "atol": 0.0,  # Convergence absolute tolerance for Newton's method
-    "rtol_p": 0.0,  # Relative tolerance for pressure convergence
+    "rtol_p": 1e-6,  # Relative tolerance for pressure convergence
     "atol_p": 0.0,  # Absolute tolerance for pressure convergence
     "rtol_c": 0.0,  # Relative tolerance for concentration convergence
     "atol_c": 0.0,  # Absolute tolerance for concentration convergence
@@ -58,8 +58,13 @@ DEFAULTS = {
 
     # factor_react is the continuation factor for the reaction rate
     # This factor is adaptively cocntrolled
+    "newton_conv_rate_min": 3.0,
     "factor_react": 1.0,  # Reaction rate factor
-    
+    "dfactor_react_init": 1.0,  # Initial reaction rate factor increment
+    "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
+    "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
+    "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react
+    "penalty_p": 0.0,
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
     "F_perm_in": 0.02, # Inlet molar flow rate [mol/s]

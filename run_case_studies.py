@@ -1,4 +1,5 @@
 import os
+import csv
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,10 +24,10 @@ class SafeEncoder(json.JSONEncoder):
             return obj.tolist()
         
         # 3. Handle Functions and Lambdas (The fix for your issue)
-        #elif isinstance(obj, (types.FunctionType, types.LambdaType)) or callable(obj):
+        elif isinstance(obj, (types.FunctionType, types.LambdaType)) or callable(obj):
             # Return the string representation (e.g. "<function <lambda> at ...>")
             # or you can return "Skipped Function" if you prefer
-        #    return str(obj)
+            return str(obj)
         
         # 4. Fallback for other non-serializable objects
         return super().default(obj)
@@ -58,13 +59,33 @@ def calculate_flows(GHSV, vol_reactor, sweep_ratio, H2_N2_ratio, T_STP = 273.15,
     return F_ret_in, F_perm_in, y_H2_in, y_N2_in
 
 # --- Main Execution Function ---
-def run_case_studies(csv_path="case_studies.csv"):
+def run_case_studies(csv_path="debug.csv"):
     # 1. Load the CSV
     try:
         df = pd.read_csv(csv_path)
     except FileNotFoundError:
         print(f"Error: {csv_path} not found.")
         return
+
+    # Define output CSV path and header
+    summary_csv_path = "case_studies_summary.csv"
+    summary_header = [
+        'Case_ID', 'Description',
+        'Ret_Left_H2', 'Ret_Left_N2', 'Ret_Left_NH3',
+        'Ret_Right_H2', 'Ret_Right_N2', 'Ret_Right_NH3',
+        'Perm_Left_H2', 'Perm_Left_N2', 'Perm_Left_NH3',
+        'Perm_Right_H2', 'Perm_Right_N2', 'Perm_Right_NH3',
+        'Bal_H2', 'Bal_N2', 'Bal_NH3',
+        'Elem_H_Bal', 'Elem_N_Bal'
+    ]
+
+    # Initialize the summary CSV file with header
+    # We open in 'w' mode to overwrite or start fresh. 
+    # If appending to existing logs is desired across multiple runs, 'a' could be used, 
+    # but usually a clean start per run is safer unless specified otherwise.
+    with open(summary_csv_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(summary_header)
 
     # 2. Loop over each case
     for index, row in df.iterrows():
@@ -91,7 +112,8 @@ def run_case_studies(csv_path="case_studies.csv"):
             sweep_ratio=sweep_ratio,
             H2_N2_ratio=H2_N2_ratio
         )
-        y_ret_in = np.array([y_H2_in, y_N2_in, 0.0])
+        y_ret_in = [y_H2_in, y_N2_in, 0.0]
+        print(GHSV, sweep_ratio, H2_N2_ratio, y_ret_in)
 
         p_ret_out = row['p_ret_bar'] * 1e5
         T_ret_in = row['T_ret_K']
@@ -125,8 +147,29 @@ def run_case_studies(csv_path="case_studies.csv"):
             print(f'axial flows permeate side: left {flows_perm_ax[0,:]} right {flows_perm_ax[-1,:]}')
             flows_tot = flows_ret_ax[0,:] + flows_perm_ax[0,:] -  flows_ret_ax[-1,:] - flows_perm_ax[-1,:]
             print(f'total balance per component: {flows_tot}')
-            print(f'elemental H balance: {2*flows_tot[0] + 3*flows_tot[2]}')
-            print(f'elemental N balance: {2*flows_tot[1] + flows_tot[2]}')
+            elem_H_bal = 2*flows_tot[0] + 3*flows_tot[2]
+            elem_N_bal = 2*flows_tot[1] + flows_tot[2]
+            print(f'elemental H balance: {elem_H_bal}')
+            print(f'elemental N balance: {elem_N_bal}')
+
+            # Append results to CSV
+            with open(summary_csv_path, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                row_data = [
+                    case_id, row['Description'],
+                    # Retentate Left (Inlet) - Index 0
+                    flows_ret_ax[0, 0], flows_ret_ax[0, 1], flows_ret_ax[0, 2],
+                    # Retentate Right (Outlet) - Index -1
+                    flows_ret_ax[-1, 0], flows_ret_ax[-1, 1], flows_ret_ax[-1, 2],
+                    # Permeate Left - Index 0
+                    flows_perm_ax[0, 0], flows_perm_ax[0 , 1], flows_perm_ax[0, 2],
+                    # Permeate Right - Index -1
+                    flows_perm_ax[-1, 0], flows_perm_ax[-1, 1], flows_perm_ax[-1, 2],
+                    # Balances
+                    flows_tot[0], flows_tot[1], flows_tot[2],
+                    elem_H_bal, elem_N_bal
+                ]
+                writer.writerow(row_data)
 
         except Exception as e:
             print(f"Case {case_id} failed: {e}")
