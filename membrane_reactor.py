@@ -100,9 +100,16 @@ class MembraneReactor:
         self.kinetics = AmmoniaSynthesisKinetics(self.species, T=T_ret, p=p_ret, rho_b=self.rho_b, rho_c=self.rho_c)
         #self.kinetics = TestKinetics(T=T_ret, p=p_ret)
         self.init_jac()
-
         self.factor_norm_c = (self.c_p[...,:-1].size)**(-1.0/self.ord_norm)
         self.factor_norm_p = (self.c_p[...,-1].size)**(-1.0/self.ord_norm)
+        self.init_c_p()
+        
+    def init_c_p(self):
+        CLF = 1e-1
+        dz_cell = np.min(self.z_f[1:] - self.z_f[:-1])
+        u_max = np.maximum(np.max(np.abs(self.u_perm_ax)), np.max(np.abs(self.u_ret_ax)))
+        dt_small = CLF * dz_cell / u_max
+        self.solve(num_timesteps=2, dt=dt_small)
 
     def init_derived_parameters(self):
         """Compute geometry-dependent counts, densities, permeabilities & inlets.
@@ -119,7 +126,9 @@ class MembraneReactor:
         self.num_c = len(self.species)
         self.rho_b = self.rho_c*self.Dcat*(1-self.eps) #[Kgcat/m3R] bed density    
         
-        self.correlation = GasMixtureCorrelations(self.species, self.database)    
+        self.correlation = GasMixtureCorrelations(self.species, self.database)
+        #self.molar_density = self.correlation.molar_density
+        self.molar_density = lambda y, T, p: np.broadcast_to(np.array(100.0), y.shape[:-1])
         
         self.num_r_perm = np.round(self.r_max_perm / self.r_max *self.num_r).astype('int') + 3
         self.num_r_ret = self.num_r - self.num_r_perm
@@ -197,10 +206,10 @@ class MembraneReactor:
         if c is None:
             c = self.c_p[..., :-1]
             c_ret = c[:, self.num_r_perm:, :]
-            c_ret_0 = self.correlation.molar_density(self.y_ret_init, self.T_ret_init, self.p_ret_out)*self.y_ret_init
+            c_ret_0 = self.molar_density(self.y_ret_init, self.T_ret_init, self.p_ret_out)*self.y_ret_init
             c_ret[...] = np.broadcast_to(c_ret_0, c_ret.shape)
             c_perm = c[:, :self.num_r_perm, :]
-            c_perm_0 = self.correlation.molar_density(self.y_perm_init, self.T_perm_init, self.p_perm_out)*self.y_perm_init
+            c_perm_0 = self.molar_density(self.y_perm_init, self.T_perm_init, self.p_perm_out)*self.y_perm_init
             c_perm[...] = np.broadcast_to(c_perm_0.reshape((1,1,-1)), c_perm.shape)
         else:
             self.c_p[...,:-1] = np.broadcast_to(np.array(c), shape_c).copy()
@@ -465,7 +474,9 @@ class MembraneReactor:
             
             # test: axial dispersion zero
             diff_matrix_perm_ax *= 0
+            diff_matrix_perm_rad *= 0
             diff_matrix_ret_ax *= 0
+            diff_matrix_ret_rad *= 0
             
             self.jac_c_diff = self.div_c_ret_ax @ (-diff_matrix_ret_ax) @ self.grad_c_ret_ax + self.div_c_ret_rad @ (-diff_matrix_ret_rad) @ self.grad_c_ret_rad + self.div_c_perm_ax @ (-diff_matrix_perm_ax) @ self.grad_c_perm_ax + self.div_c_perm_rad @ (-diff_matrix_perm_rad) @ self.grad_c_perm_rad 
             self.g_bc_c_diff = self.div_c_ret_ax @ ((-diff_matrix_ret_ax) @ self.grad_bc_c_ret_ax) +self.div_c_perm_ax @ ((-diff_matrix_perm_ax) @ self.grad_bc_c_perm_ax)
@@ -645,7 +656,7 @@ class MembraneReactor:
             g_ret[...] -= self.g_react_source
         return g, self._jac
 
-    def construct_g_c_p(self, c_p=None, T=None, c_old=None, compute_jac=False, kinetics_as_source = False):
+    def construct_g_c_p(self, c_old, T_old, dt, compute_jac=False, kinetics_as_source = False):
         """
         Construct the residual vector g and the Jacobian matrix for the system.
 
@@ -657,10 +668,8 @@ class MembraneReactor:
         - g (numpy.ndarray): Residual vector.
         - Jac (scipy.sparse.csc_matrix): Jacobian matrix.
         """
-        if (c_p is None):
-            c_p = self.c_p
-        if (T is None):
-            T = self.T
+        c_p = self.c_p
+        T = self.T
         c = c_p[...,:-1]
         p = c_p[...,-1]
         shape_c_p = c_p.shape
@@ -679,23 +688,23 @@ class MembraneReactor:
         if compute_jac:
             jac_cc = jac_conv + jac_diff
             if (c_old is not None):
-                jac_cc += (1.0/self.dt)*self.jac_c_accum
+                jac_cc += (1.0/dt)*self.jac_c_accum
             if not kinetics_as_source:
                 g_react, jac_react = self.numjac(lambda c: self.factor_react*self.kinetics(c*p_over_c_tot), c_ret)
                 shape_c_ret = c_ret.shape
                 offset = (0, self.num_r_perm, 0)
                 jac_react = update_csc_array_indices(jac_react, shape_c_ret, c.shape, offset=offset)
                 jac_cc -= jac_react
-            c_tot, dc_tot_dp_mat = self.numjac_p(lambda p: self.correlation.molar_density(y, T, p), p)
+            c_tot, dc_tot_dp_mat = self.numjac_p(lambda p: self.molar_density(y, T, p), p)
             y_mat = construct_coefficient_matrix(y, shape=(c.shape, p.shape+(1,)))
             jac_darcy = self.construct_jac_darcy()
-            jac_pp = self.sum_c @ jac_darcy
-            jac_pp += (self.sum_c @ jac_cc @ y_mat) @ dc_tot_dp_mat
+            #jac_pp = self.sum_c @ jac_darcy
+            #jac_pp += (self.sum_c @ jac_cc @ y_mat) @ dc_tot_dp_mat
             jac_cp = jac_darcy
-            jac_pc = self.sum_c @ jac_cc
-            jac_pc = jac_pc - (jac_pc @ y_mat) @ self.sum_c
-            jac_pp += self.penalty_p * dc_tot_dp_mat
-            jac_pc -= self.penalty_p * self.sum_c
+            #jac_pc = self.sum_c @ jac_cc
+            #jac_pc = jac_pc - (jac_pc @ y_mat) @ self.sum_c
+            jac_pp = dc_tot_dp_mat
+            jac_pc = -self.sum_c
             shape_c = c.shape
             shape_p = p.shape + (1,)
             offset = (0,)*(c.ndim-1) + (shape_c[-1],)
@@ -705,20 +714,20 @@ class MembraneReactor:
             jac_pc = update_csc_array_indices(jac_pc, (shape_p, shape_c), shape_c_p, offset=(offset, None))
             self._jac = jac_cc + jac_pp + jac_cp + jac_pc
         else:
-            c_tot =self.correlation.molar_density(y, T, p)
+            c_tot =self.molar_density(y, T, p)
             if not kinetics_as_source:
                 g_react =  self.factor_react*self.kinetics(c_ret*p_over_c_tot)
         
         g_c = self.g_c_in.reshape(c.shape) + g_conv + g_diff
         if (c_old is not None):
-            g_c += (self.jac_c_accum @ ((c-c_old).reshape((-1, 1))/self.dt)).reshape(c.shape)        
+            g_c += (self.jac_c_accum @ ((c-c_old).reshape((-1, 1))/dt)).reshape(c.shape)        
         g_ret = g_c[:, self.num_r_perm:, :]
         if not kinetics_as_source:
             self.g_react_source = g_react
             g_ret[...] -= g_react
         else:
             g_ret[...] -= self.g_react_source
-        g_p = np.sum(g_c, axis=-1) + self.penalty_p * (c_tot - c_sum)
+        g_p = (c_tot - c_sum)
         g[...,:-1] = g_c
         g[...,-1] = g_p
         return g, self._jac
@@ -885,21 +894,20 @@ class MembraneReactor:
 
         return g, jac_cond, cp_inv_mat
 
-    def construct_g_T(self, T=None, T_old=None, compute_jac=False):
-        """Combine accumulation, convection, conduction for temperature residual."""
-        if (T is None):
-            T = self.T   
+    def construct_g_T(self, T_old, dt, compute_jac=False):
+        """Combine accumulation, convection, conduction for temperature residual.""" 
+        T = self.T
         g_conv, jac_conv = self.construct_g_T_conv(T, compute_jac=compute_jac)
         g_cond, jac_cond, cp_inv_mat = self.construct_g_T_cond(T)
         g =  g_conv + g_cond
         if T_old is not None:
-            g += (self.jac_T_accum @ ((T-T_old).reshape((-1, 1))/self.dt)).reshape(T.shape)
+            g += (self.jac_T_accum @ ((T-T_old).reshape((-1, 1))/dt)).reshape(T.shape)
 
         if (compute_jac):
-            self._jac_T = (1.0/self.dt)*self.jac_T_accum + jac_conv + jac_cond
+            self._jac_T = (1.0/dt)*self.jac_T_accum + jac_conv + jac_cond
         return g, self._jac_T, cp_inv_mat
     
-    def solve_temperature(self, T_old = None):
+    def solve_temperature(self, T_old, dt):
         """Solve energy equation (if non-isothermal) including reaction heat.
 
         Returns:
@@ -913,7 +921,7 @@ class MembraneReactor:
         c_ret = c[:, self.num_r_perm:,:]
         p_ret = p[:, self.num_r_perm:]
         T_ret = T[:,self.num_r_perm:]        
-        g_T, jac_T, cp_inv_mat = self.construct_g_T(T, T_old=T_old, compute_jac=True)
+        g_T, jac_T, cp_inv_mat = self.construct_g_T(T_old, dt, compute_jac=True)
         g_T_ret = g_T[:,self.num_r_perm:]
         p_partial = p[:,self.num_r_perm:,np.newaxis]*c_ret/np.sum(c_ret, axis=-1, keepdims=True)
         rates =  self.factor_react*self.kinetics(p_partial)
@@ -929,7 +937,7 @@ class MembraneReactor:
         self.kinetics.set_T_and_p(T=T_ret)
         return success
 
-    def solve_c_p(self, c_old = None, verbose = 0):
+    def solve_c_p(self, c_old, T_old, dt, verbose = 0):
         """Newton/line-search solve for species concentrations.
 
         Returns:
@@ -945,7 +953,8 @@ class MembraneReactor:
         factor_norm_p = self.factor_norm_p
         c_p_vec = c_p.ravel()
         for k in range(self.num_concentration_iterations):
-            g, jac= self.construct_g_c_p(c_p, c_old = c_old, compute_jac=True)
+            self.construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])
+            g, jac= self.construct_g_c_p(c_old, T_old, dt, compute_jac=True)
             g_norm = np.linalg.norm(g[...,:-1].ravel(), ord=ord) * factor_norm_c
             g_p_norm = np.linalg.norm(g[...,-1].ravel(), ord=ord) * factor_norm_p
             if k==0:
@@ -959,12 +968,13 @@ class MembraneReactor:
             alpha = 1.0
             while True:
                 c_p_vec[...] = c_p_prev + alpha*dc_p
-                self.construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])          
+                #self.construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])          
                 self.update_velocity_fields(p=c_p[...,-1])
                 compute_jac = (k < self.num_concentration_iterations - 1)
-                g, _ = self.construct_g_c_p(c_p, c_old=c_old, compute_jac=False)
+                g, _ = self.construct_g_c_p(c_old, T_old, dt, compute_jac=False)
                 g_norm = np.linalg.norm(g[...,:-1].ravel(), ord=ord) * factor_norm_c
                 g_p_norm = np.linalg.norm(g[...,-1].ravel(), ord=ord)* factor_norm_p
+                break
                 if (g_norm < (1.0-1e-4*alpha)*g_norm_prev and g_p_norm < (1.0-1e-4*alpha)*g_p_norm_prev) or (not success):
                     break
                 alpha *= 0.5
@@ -988,14 +998,14 @@ class MembraneReactor:
         return dt_chem_min
         
 
-    def compute_g_norm(self, c_old=None):
+    def compute_g_norm(self, c_old=None, T_old=None, dt=None):
         """Compute norms of species residual and its sum (pressure consistency)."""
-        g, _ = self.construct_g_c(self.c, c_old=c_old, compute_jac=False)
+        g, _ = self.construct_g_c(c_old, T_old, dt, compute_jac=False)
         g_norm = np.linalg.norm(g.ravel(), ord=self.ord_norm) * self.factor_norm_c
         g_p_norm = np.linalg.norm(np.sum(g, axis=-1).ravel(), ord=self.ord_norm) * self.factor_norm_p
         return g_norm, g_p_norm
 
-    def _solve_step(self, c_old = None, T_old = None):
+    def _solve_step(self, c_old, T_old, dt):
         """
         Helper method: Performs segregated Newton iterations for a fixed `self.factor_react`.
         This is the "corrector" part of the continuation scheme.
@@ -1004,10 +1014,9 @@ class MembraneReactor:
             num_iterations (int): The number of outer Newton iterations taken.
             success (bool): True if the solution converged within tolerances, False otherwise.
         """
-
         for j in range(self.num_newton_iterations):
             # --- Segregated Solves ---
-            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = self.solve_c_p(c_old=c_old)
+            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = self.solve_c_p(c_old, T_old, dt)
             print(f"j: {j}, g_norm: {g_norm}")
             if j == 0:
                 g_norm_init = g_norm_start
@@ -1015,7 +1024,7 @@ class MembraneReactor:
 
             success_T = True
             if not self.is_isothermal:
-                success_T = self.solve_temperature(T_old=T_old)
+                success_T = self.solve_temperature(T_old, dt)
                 
             if (g_norm > 10*g_norm_init or g_p_norm > 10*g_p_norm_init):
                 return j+1, g_norm, g_p_norm, False, g_norm/g_norm_init, g_p_norm/g_p_norm_init
@@ -1036,22 +1045,24 @@ class MembraneReactor:
         
         if num_timesteps is None:
             num_timesteps = self.num_timesteps
-        if dt is not None:
-            self.dt = dt
+        if dt is None:
+            dt = self.dt
         self.cnt_c_p, self.cnt_T = 0, 0
         for i in range(num_timesteps):
             T_old = self.T.copy()
             c_old = self.c_p[...,:-1].copy()
-            num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old=c_old, T_old=T_old)
+            num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
         return is_converged
 
-    def solve_adaptive(self, c_old=None, T_old=None, verbose = 0):
+    def solve_adaptive(self, c_old=None, T_old=None, dt=None, verbose = 0):
         """
         Solves the steady-state problem using an adaptive predictor-corrector
         continuation method on the reaction rate scaling factor. This is the
         recommended robust solver for difficult non-linear problems.
         """
         # --- Initialization ---
+        if (dt is None):
+            dt = self.dt
         
         conv_factor_min = math.exp(-self.newton_conv_rate_min)
         self.cnt_c_p, self.cnt_T = 0, 0, 0
@@ -1096,7 +1107,7 @@ class MembraneReactor:
             # --- Corrector Step ---
             if verbose > 1:
                 print(f"Attempting factor_react = {self.factor_react:.4f} (step size = {dfactor_react:.4f})...")
-            num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old=c_old, T_old=T_old)
+            num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
             is_converging = ((conv_factor < conv_factor_min) and (conv_factor_p < 1)) or is_converged
             if is_converged and self.factor_react == factor_react_max:
                 break
