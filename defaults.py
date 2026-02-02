@@ -60,11 +60,11 @@ DEFAULTS = {
     # This factor is adaptively cocntrolled
     "newton_conv_rate_min": 3.0,
     "factor_react": 1.0,  # Reaction rate factor
-    "dfactor_react_init": 1.0,  # Initial reaction rate factor increment
+    "dfactor_react_init": 1e-2,  # Initial reaction rate factor increment
     "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
     "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
     "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react
-    "penalty_p": 0.0,
+    "factor_p": 1.0,
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
     "F_perm_in": 0.02, # Inlet molar flow rate [mol/s]

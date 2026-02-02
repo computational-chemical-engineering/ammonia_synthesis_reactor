@@ -127,8 +127,6 @@ class MembraneReactor:
         self.rho_b = self.rho_c*self.Dcat*(1-self.eps) #[Kgcat/m3R] bed density    
         
         self.correlation = GasMixtureCorrelations(self.species, self.database)
-        #self.molar_density = self.correlation.molar_density
-        self.molar_density = lambda y, T, p: np.broadcast_to(np.array(100.0), y.shape[:-1])
         
         self.num_r_perm = np.round(self.r_max_perm / self.r_max *self.num_r).astype('int') + 3
         self.num_r_ret = self.num_r - self.num_r_perm
@@ -174,6 +172,8 @@ class MembraneReactor:
         self.rL = self.r_max / self.L
         self.Lr = self.L / self.r_max
 
+        self.conv_factor_min = math.exp(-self.newton_conv_rate_min)
+
     def create_spatial_discretization(self):
         # Time-Stepping
         #self.num_time_steps = int(np.round(self.L / self.u0 / self.dt * 5))
@@ -206,15 +206,15 @@ class MembraneReactor:
         if c is None:
             c = self.c_p[..., :-1]
             c_ret = c[:, self.num_r_perm:, :]
-            c_ret_0 = self.molar_density(self.y_ret_init, self.T_ret_init, self.p_ret_out)*self.y_ret_init
+            c_ret_0 = self.correlation.molar_density(self.y_ret_init, self.T_ret_init, self.p_ret_out)*self.y_ret_init
             c_ret[...] = np.broadcast_to(c_ret_0, c_ret.shape)
             c_perm = c[:, :self.num_r_perm, :]
-            c_perm_0 = self.molar_density(self.y_perm_init, self.T_perm_init, self.p_perm_out)*self.y_perm_init
+            c_perm_0 = self.correlation.molar_density(self.y_perm_init, self.T_perm_init, self.p_perm_out)*self.y_perm_init
             c_perm[...] = np.broadcast_to(c_perm_0.reshape((1,1,-1)), c_perm.shape)
         else:
             self.c_p[...,:-1] = np.broadcast_to(np.array(c), shape_c).copy()
-            c_ret = self.c[:, self.num_r_perm:, :]
-            c_perm = self.c[:, :self.num_r_perm, :]
+            c_ret = self.c_p[:, self.num_r_perm:, :-1]
+            c_perm = self.c_p[:, :self.num_r_perm, :-1]
         
         self.c_ret_ax = interp_cntr_to_stagg(c_ret, x_f=self.z_f, x_c=self.z_c, axis=0)
         self.c_ret_rad = interp_cntr_to_stagg(c_ret, x_f=self.r_f_ret, x_c=self.r_c_ret, axis=1)
@@ -472,12 +472,6 @@ class MembraneReactor:
             diff_field_perm_rad = interp_cntr_to_stagg(diff_field_perm, x_f=self.r_f_perm, x_c=self.r_c_perm, axis=1)
             diff_matrix_perm_rad = construct_coefficient_matrix(diff_field_perm_rad, shape_c_perm, axis=1)
             
-            # test: axial dispersion zero
-            diff_matrix_perm_ax *= 0
-            diff_matrix_perm_rad *= 0
-            diff_matrix_ret_ax *= 0
-            diff_matrix_ret_rad *= 0
-            
             self.jac_c_diff = self.div_c_ret_ax @ (-diff_matrix_ret_ax) @ self.grad_c_ret_ax + self.div_c_ret_rad @ (-diff_matrix_ret_rad) @ self.grad_c_ret_rad + self.div_c_perm_ax @ (-diff_matrix_perm_ax) @ self.grad_c_perm_ax + self.div_c_perm_rad @ (-diff_matrix_perm_rad) @ self.grad_c_perm_rad 
             self.g_bc_c_diff = self.div_c_ret_ax @ ((-diff_matrix_ret_ax) @ self.grad_bc_c_ret_ax) +self.div_c_perm_ax @ ((-diff_matrix_perm_ax) @ self.grad_bc_c_perm_ax)
 
@@ -549,7 +543,7 @@ class MembraneReactor:
             tuple: (g, jac) residual and Jacobian (or None if compute_jac=False)
         """
         if c is None:
-            c = self.c
+            c = self.c_p[...,:-1]
         bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
         bc_none = {'a': 0, 'b': 0, 'd': 0}
         if (self.is_counter_current):
@@ -609,53 +603,6 @@ class MembraneReactor:
         else:
             return g, None
            
-    def construct_g_c(self, c=None, c_old=None, compute_jac=False, kinetics_as_source = False):
-        """
-        Construct the residual vector g and the Jacobian matrix for the system.
-
-        Parameters:
-        - c (numpy.ndarray): Current concentration field.
-        - c_old (numpy.ndarray): Previous concentration field.
-
-        Returns:
-        - g (numpy.ndarray): Residual vector.
-        - Jac (scipy.sparse.csc_matrix): Jacobian matrix.
-        """
-        if (c is None):
-            c = self.c
-
-        c_ret = c[:, self.num_r_perm:, :]
-        c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
-        #_, c_tot_ret =  self.split_perm_and_ret(c_tot)
-        _, p_ret =  self.split_perm_and_ret(self.p)
-        
-        g_conv, jac_conv = self.construct_g_conv(c, compute_jac=compute_jac)
-        g_diff, jac_diff = self.construct_g_diff(c, compute_jac=compute_jac)
-        g = self.g_c_in.reshape(c.shape) + g_conv + g_diff
-        if (c_old is not None):
-            g += (self.jac_c_accum @ ((c-c_old).reshape((-1, 1))/self.dt)).reshape(c.shape)
-        #p_over_c_tot = p_ret[..., np.newaxis]/c_tot_ret[..., np.newaxis]
-        p_over_c_tot = p_ret[..., np.newaxis]/c_tot_ret
-        if compute_jac:
-            self._jac = jac_conv + jac_diff
-            if (c_old is not None):
-                self._jac += (1.0/self.dt)*self.jac_c_accum
-            if not kinetics_as_source:
-                g_react, jac_react = self.numjac(lambda c: self.factor_react*self.kinetics(c*p_over_c_tot), c_ret)
-                shape_c_ret = c_ret.shape
-                offset = (0, self.num_r_perm, 0)
-                jac_react = update_csc_array_indices(jac_react, shape_c_ret, c.shape, offset=offset)
-                self._jac -= jac_react
-        elif not kinetics_as_source:
-            g_react =  self.factor_react*self.kinetics(c_ret*p_over_c_tot)
-        g_ret = g[:, self.num_r_perm:, :]
-        if not kinetics_as_source:
-            self.g_react_source = g_react
-            g_ret[...] -= g_react
-        else:
-            g_ret[...] -= self.g_react_source
-        return g, self._jac
-
     def construct_g_c_p(self, c_old, T_old, dt, compute_jac=False, kinetics_as_source = False):
         """
         Construct the residual vector g and the Jacobian matrix for the system.
@@ -679,7 +626,6 @@ class MembraneReactor:
         
         c_ret = c[:, self.num_r_perm:, :]
         c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
-        #_, c_tot_ret =  self.split_perm_and_ret(c_tot)
         _, p_ret =  self.split_perm_and_ret(p)
         p_over_c_tot = p_ret[..., np.newaxis]/c_tot_ret
 
@@ -695,7 +641,7 @@ class MembraneReactor:
                 offset = (0, self.num_r_perm, 0)
                 jac_react = update_csc_array_indices(jac_react, shape_c_ret, c.shape, offset=offset)
                 jac_cc -= jac_react
-            c_tot, dc_tot_dp_mat = self.numjac_p(lambda p: self.molar_density(y, T, p), p)
+            c_tot, dc_tot_dp_mat = self.numjac_p(lambda p: self.correlation.molar_density(y, T, p), p)
             y_mat = construct_coefficient_matrix(y, shape=(c.shape, p.shape+(1,)))
             jac_darcy = self.construct_jac_darcy()
             #jac_pp = self.sum_c @ jac_darcy
@@ -703,8 +649,8 @@ class MembraneReactor:
             jac_cp = jac_darcy
             #jac_pc = self.sum_c @ jac_cc
             #jac_pc = jac_pc - (jac_pc @ y_mat) @ self.sum_c
-            jac_pp = dc_tot_dp_mat
-            jac_pc = -self.sum_c
+            jac_pp = self.factor_p*dc_tot_dp_mat
+            jac_pc = -self.factor_p*self.sum_c
             shape_c = c.shape
             shape_p = p.shape + (1,)
             offset = (0,)*(c.ndim-1) + (shape_c[-1],)
@@ -714,7 +660,7 @@ class MembraneReactor:
             jac_pc = update_csc_array_indices(jac_pc, (shape_p, shape_c), shape_c_p, offset=(offset, None))
             self._jac = jac_cc + jac_pp + jac_cp + jac_pc
         else:
-            c_tot =self.molar_density(y, T, p)
+            c_tot =self.correlation.molar_density(y, T, p)
             if not kinetics_as_source:
                 g_react =  self.factor_react*self.kinetics(c_ret*p_over_c_tot)
         
@@ -727,7 +673,7 @@ class MembraneReactor:
             g_ret[...] -= g_react
         else:
             g_ret[...] -= self.g_react_source
-        g_p = (c_tot - c_sum)
+        g_p = self.factor_p*(c_tot - c_sum)
         g[...,:-1] = g_c
         g[...,-1] = g_p
         return g, self._jac
@@ -806,12 +752,13 @@ class MembraneReactor:
         Returns:
             tuple: (g_cond, jac_cond, cp_inv_matrix)
         """
+        c = self.c_p[...,:-1]
         g = np.empty(T.shape)
         g_vect = g.reshape((-1,1))
         
-        y = self.c/np.sum(self.c, axis=-1, keepdims=True)  # Mole fractions
+        y = c/np.sum(c, axis=-1, keepdims=True)  # Mole fractions
         lmbda = self.correlation.thermal_conductivity(y, T)
-        cp = self.correlation.specific_heat(self.c, T)
+        cp = self.correlation.specific_heat(c, T)
 
         lmbda_perm = lmbda[:, 0:self.num_r_perm]
         lmbda_perm_ax = interp_cntr_to_stagg(lmbda_perm, self.z_f, self.z_c, axis=0)
@@ -844,8 +791,8 @@ class MembraneReactor:
         y_ret  = y[:, self.num_r_perm:,:]
         _, _ ,y_perm_i, _ = compute_boundary_values(y_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
         y_ret_i,_,_,_ = compute_boundary_values(y_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        c_perm = self.c[:, 0:self.num_r_perm,:]
-        c_ret  = self.c[:, self.num_r_perm:,:]
+        c_perm = c[:, 0:self.num_r_perm,:]
+        c_ret  = c[:, self.num_r_perm:,:]
         _, _ ,c_perm_i, _ = compute_boundary_values(c_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
         c_ret_i,_,_,_ = compute_boundary_values(c_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
         _, _ ,u_perm_ax_i, _ = compute_boundary_values(self.u_perm_ax, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
@@ -857,8 +804,8 @@ class MembraneReactor:
         visc_ret = self.correlation.viscosity(y_ret_i, T_ret_i)
         rho_ret = self.correlation.molecular_weight(c_ret_i)
         cp_ret = self.correlation.specific_heat(c_ret_i, T_ret_i)
-        Re_ret = rho_ret*self.dp*np.abs(u_ret_i)/visc_ret
-        Pr_ret = visc_ret * cp_ret / lmbda_ret_rad[:,[0]]
+        Re_ret = np.abs(rho_ret*self.dp*u_ret_i/visc_ret)
+        Pr_ret = np.abs(visc_ret * cp_ret / lmbda_ret_rad[:,[0]])
         Nu_ret = self.Nu_ret(Re_ret, Pr_ret)
         h_ret = Nu_ret*lmbda_ret_rad[:,[0]]/self.dp
 
@@ -866,8 +813,8 @@ class MembraneReactor:
         visc_perm = self.correlation.viscosity(y_perm_i, T_perm_i)
         rho_perm = self.correlation.molecular_weight(c_perm_i)
         cp_perm = self.correlation.specific_heat(c_perm_i, T_perm_i)
-        Re_perm = rho_perm*d_tube*np.abs(u_perm_i)/visc_perm
-        Pr_perm = visc_perm * cp_perm / lmbda_perm_rad[:,[-1]]
+        Re_perm = np.abs(rho_perm*d_tube*u_perm_i/visc_perm)
+        Pr_perm = np.abs(visc_perm * cp_perm / lmbda_perm_rad[:,[-1]])
         Nu_perm = self.Nu_perm(Re_perm, Pr_perm)
         h_perm = Nu_perm*lmbda_perm_rad[:,[-1]]/d_tube
 
@@ -907,7 +854,7 @@ class MembraneReactor:
             self._jac_T = (1.0/dt)*self.jac_T_accum + jac_conv + jac_cond
         return g, self._jac_T, cp_inv_mat
     
-    def solve_temperature(self, T_old, dt):
+    def solve_T(self, T_old, dt):
         """Solve energy equation (if non-isothermal) including reaction heat.
 
         Returns:
@@ -934,7 +881,7 @@ class MembraneReactor:
         success = (np.linalg.norm(dT, ord=np.inf) < 500) and (np.all(T_vec+dT)>0.0)
         if success:
             T_vec[...] += dT
-        self.kinetics.set_T_and_p(T=T_ret)
+        self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:])
         return success
 
     def solve_c_p(self, c_old, T_old, dt, verbose = 0):
@@ -988,22 +935,19 @@ class MembraneReactor:
                 break
         return g_norm, g_norm_init, g_p_norm, g_p_norm_init,success 
 
-    def compute_dt_chem_min(self, rates, c_ret):
+    def compute_dt_chem_min(self):
         """Return minimum explicit chemical time step avoiding negative c."""
-        eps = 1e-30
+        c_ret = self.c_p[:, self.num_r_perm:, :-1]
+        c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
+        _, p_ret =  self.split_perm_and_ret(self.c_p[...,-1])
+        p_over_c_tot = p_ret[..., np.newaxis]/c_tot_ret
+        rates = self.kinetics(c_ret*p_over_c_tot)
+        eps = 1e-8
         dt_chem_local = np.where(rates < 0,
                                     np.maximum(c_ret, eps) / (-rates + eps),
                                     np.inf)
         dt_chem_min = np.min(dt_chem_local)
         return dt_chem_min
-        
-
-    def compute_g_norm(self, c_old=None, T_old=None, dt=None):
-        """Compute norms of species residual and its sum (pressure consistency)."""
-        g, _ = self.construct_g_c(c_old, T_old, dt, compute_jac=False)
-        g_norm = np.linalg.norm(g.ravel(), ord=self.ord_norm) * self.factor_norm_c
-        g_p_norm = np.linalg.norm(np.sum(g, axis=-1).ravel(), ord=self.ord_norm) * self.factor_norm_p
-        return g_norm, g_p_norm
 
     def _solve_step(self, c_old, T_old, dt):
         """
@@ -1017,6 +961,7 @@ class MembraneReactor:
         for j in range(self.num_newton_iterations):
             # --- Segregated Solves ---
             g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = self.solve_c_p(c_old, T_old, dt)
+            self.kinetics.set_T_and_p(p=self.c_p[:,self.num_r_perm:,-1])
             print(f"j: {j}, g_norm: {g_norm}")
             if j == 0:
                 g_norm_init = g_norm_start
@@ -1024,7 +969,8 @@ class MembraneReactor:
 
             success_T = True
             if not self.is_isothermal:
-                success_T = self.solve_temperature(T_old, dt)
+                success_T = self.solve_T(T_old, dt)
+                self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:])
                 
             if (g_norm > 10*g_norm_init or g_p_norm > 10*g_p_norm_init):
                 return j+1, g_norm, g_p_norm, False, g_norm/g_norm_init, g_p_norm/g_p_norm_init
@@ -1033,9 +979,9 @@ class MembraneReactor:
             if (g_norm < np.maximum(self.rtol * g_norm_init, self.atol)):
                 return j+1, g_norm, g_p_norm, success, g_norm/g_norm_init, g_p_norm/g_p_norm_init # Converged!
 
-        return self.num_newton_iterations-1, g_norm, g_p_norm, success, g_norm/g_norm_init, g_p_norm/g_p_norm_init # Failed to converge within max iterations
+        return self.num_newton_iterations, g_norm, g_p_norm, success, g_norm/g_norm_init, g_p_norm/g_p_norm_init # Failed to converge within max iterations
 
-    def solve(self, num_timesteps=None, dt=None):
+    def solve(self, num_timesteps=None, dt=None, **kwargs):
         """
         Solves the steady-state problem using an adaptive predictor-corrector
         continuation method on the reaction rate scaling factor. This is the
@@ -1043,18 +989,20 @@ class MembraneReactor:
         """
         # --- Initialization ---
         
+        is_converged = False
         if num_timesteps is None:
             num_timesteps = self.num_timesteps
         if dt is None:
             dt = self.dt
+
         self.cnt_c_p, self.cnt_T = 0, 0
         for i in range(num_timesteps):
             T_old = self.T.copy()
             c_old = self.c_p[...,:-1].copy()
-            num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
+            is_converged = self.solve_adaptive_dt(dt, c_old, T_old, **kwargs)
         return is_converged
 
-    def solve_adaptive(self, c_old=None, T_old=None, dt=None, verbose = 0):
+    def solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose = 0):
         """
         Solves the steady-state problem using an adaptive predictor-corrector
         continuation method on the reaction rate scaling factor. This is the
@@ -1064,14 +1012,13 @@ class MembraneReactor:
         if (dt is None):
             dt = self.dt
         
-        conv_factor_min = math.exp(-self.newton_conv_rate_min)
-        self.cnt_c_p, self.cnt_T = 0, 0, 0
+        conv_factor_min = self.conv_factor_min
         g_norm, g_p_norm = None, None
 
         # History for predictor step (current, previous)
         c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
-        c_p_prev_prev, T_prev_prev = None, None, None
-        factor_react_prev, factor_react_prev_prev = 0.0, 0.0
+        c_p_prev_prev, T_prev_prev = None, None
+        factor_react_prev, factor_react_prev_prev = None, None
 
         # --- Step 2: Main Continuation Loop ---
         is_first_step = True
@@ -1081,34 +1028,38 @@ class MembraneReactor:
             factor_react_max = 1.0
         else:
             factor_react_max = self.factor_react
-        dfactor_react = min(self.dfactor_react_init, factor_react_max) 
-        factor_react_prev = self.factor_react        
+        dfactor_react = min(self.dfactor_react_init, factor_react_max)       
         
-        while not is_converged:
+        while True:
             g_norm, g_p_norm = None, None
             
             # --- Predictor Step ---
-            if c_p_prev_prev is not None:
+            if factor_react_prev_prev is not None:
                 # Use a first-order (secant) predictor for a better initial guess
                 d_factor_hist = factor_react_prev - factor_react_prev_prev
                 if d_factor_hist > 1e-9: # Avoid division by zero on retry
                     step_ratio = (self.factor_react - factor_react_prev) / d_factor_hist
                     self.c_p = c_p_prev + (c_p_prev - c_p_prev_prev) * step_ratio
                     self.T = T_prev + (T_prev - T_prev_prev) * step_ratio
-                    self.c_p = np.maximum(self.c, 0) # Ensure concentrations are non-negative
-                    self.construct_darcy_matrices(compute_jac=False)
-                    self.update_velocity_fields(p=self.c_p[...,-1])
+                    self.c_p = np.maximum(self.c_p, 0) # Ensure concentrations are non-negative
+                else:
+                    self.c_p = c_p_prev.copy()
+                    self.T = T_prev.copy()
+                self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:], p=self.c_p[:,self.num_r_perm:,-1])
+                self.construct_darcy_matrices()
+                self.update_velocity_fields(p=self.c_p[...,-1])
             elif not is_first_step:
                 # Use a zero-order predictor (the last solution) for the first step
                 self.c_p, self.T = c_p_prev.copy(), T_prev.copy()
-                self.construct_darcy_matrices(compute_jac=False)
+                self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:], p=self.c_p[:,self.num_r_perm:,-1])
+                self.construct_darcy_matrices()
                 self.update_velocity_fields(p=self.c_p[...,-1])
 
             # --- Corrector Step ---
             if verbose > 1:
                 print(f"Attempting factor_react = {self.factor_react:.4f} (step size = {dfactor_react:.4f})...")
             num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
-            is_converging = ((conv_factor < conv_factor_min) and (conv_factor_p < 1)) or is_converged
+            is_converging = (conv_factor < conv_factor_min) or is_converged
             if is_converged and self.factor_react == factor_react_max:
                 break
             # --- Adapt Step Size ---
@@ -1116,14 +1067,15 @@ class MembraneReactor:
                 if verbose > 1:
                     print(f"Converging in {num_iters} iterations with g_norm = {g_norm:.4e} and conv_factor = {conv_factor:.4e} and g_p_norm = {g_p_norm:.4e} and conv_factor_p = {conv_factor_p:.4e}. Increasing step size.")
                 # Update history for the next predictor step
-                c_p_prev_prev, p_prev_prev, T_prev_prev = c_p_prev, p_prev, T_prev
-                factor_react_prev_prev = factor_react_prev
-                c_p_prev, T_prev = self.c.copy(), self.T.copy()
-                factor_react_prev = self.factor_react    
+                if (not is_first_step):
+                    c_p_prev_prev, T_prev_prev = c_p_prev, T_prev
+                    factor_react_prev_prev = factor_react_prev
+                    c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
+                    factor_react_prev = self.factor_react
                 # Increase step size
-                if is_converged:
-                    dfactor_react *= self.dfactor_react_increase_large
-                self.factor_react = min(self.factor_react + dfactor_react, factor_react_max)
+                    if is_converged:
+                        dfactor_react *= self.dfactor_react_increase
+                    self.factor_react = min(self.factor_react + dfactor_react, factor_react_max)
             else:
                 if verbose > 1:
                     print(f"FAILED: Took {num_iters} iterations. Restoring state and reducing step size.")
@@ -1131,14 +1083,18 @@ class MembraneReactor:
                 # Restore previous is_convergedful state
                 self.c_p, self.T = c_p_prev, T_prev
                 if is_first_step:
-                    self.factor_react = 0.0    
+                    self.factor_react = 0.0
+                    is_first_step = False
+                elif factor_react_prev is None:
+                    if verbose > 0:
+                        warnings.warn(f"No convergence even with factor_react = {self.factor_react}", RuntimeWarning)
+                    break
                 else:
                     self.factor_react = factor_react_prev
                     # Decrease step size and retry from the last good point
                     dfactor_react *= self.dfactor_react_decrease
                 if dfactor_react < self.dfactor_react_min:
                     break
-            is_first_step = False
         if is_converged:
             if verbose > 1:
                 print("\nContinuation is_convergedfully completed. Final solution at factor_react = 1.0 reached.")
@@ -1147,8 +1103,59 @@ class MembraneReactor:
                 warnings.warn(f"Continuation failed: final factor_react = {self.factor_react}", RuntimeWarning)
         return is_converged
 
-
+    def solve_adaptive_dt(self, dt, c_old, T_old, dt_init=None, dt_min=None, dt_max=None, dt_factor_increase=1.2, dt_factor_decrease=0.5, verbose = 0):
+        """
+        Solves the steady-state problem using an adaptive predictor-corrector
+        continuation method on the reaction rate scaling factor. This is the
+        recommended robust solver for difficult non-linear problems.
+        """
+        # --- Initialization ---
+        dt_chem = self.compute_dt_chem_min()
+        if (dt_init is None):
+            dt_init = min(dt_chem, dt)
+        if (dt_min is None):
+            dt_min = min(0.2*dt_chem, dt_init, dt)
+        if (dt_max is None):
+            dt_max = max(dt_init, dt)
+        t_final = dt
+        dt = dt_init
+        conv_factor_min = self.conv_factor_min
         
+        
+        
+        # History for predictor step (current, previous)
+        c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
+        t = 0.0
+        is_converged = False
+        while t < t_final or not is_converged:
+            try:
+                num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
+                #is_converging = (conv_factor < conv_factor_min) or is_converged
+                is_converging = is_converged
+            except Exception as e:
+                is_converging = False
+            if (is_converging):
+                c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
+                t += dt
+                dt = min(t + dt*dt_factor_increase, t+ dt_max, t_final) - t
+                if verbose > 1:
+                    print(f"Increasing timestep to dt = {dt}, t = {t}") 
+            else:
+                if (dt <= dt_min):
+                    break
+                elif (t >= t_final):
+                    break
+                else:
+                    self.c_p, self.T = c_p_prev.copy(), T_prev.copy()
+                    dt = max(dt*dt_factor_decrease, dt_min)
+                    self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:], p=self.c_p[:,self.num_r_perm:,-1])
+                    self.construct_darcy_matrices()
+                    self.update_velocity_fields(p=self.c_p[...,-1])
+                    if verbose > 1:
+                        print(f"Reduced dt to {dt:.4f}.")
+        if (verbose > 1 and not is_converged):
+            print(f"FAILED: Could not converge at dt = {t}")
+        return is_converged
     
     def compute_fluxes_diff(self, c = None, T = None, p = None):
         """Compute diffusive + permeation species fluxes (axis & radial)."""
@@ -1251,9 +1258,9 @@ class MembraneReactor:
         dr_sq_perm = (self.r_f_perm[1:]**2 - self.r_f_perm[:-1]**2).reshape((-1,1))
         dz = (self.z_f[1:] - self.z_f[:-1]).reshape((-1,1))
 
-        flows_ret_ax = np.pi*np.sum(fluxes_ret_ax[[0,-1],:,:]*dr_sq_ret, axis=1)
+        flows_ret_ax = np.pi*np.sum(fluxes_ret_ax*dr_sq_ret, axis=1)
         flows_ret_mem = 2.0*np.pi*self.r_f_ret[0]*np.sum(fluxes_ret_rad[:,0,:]*dz, axis=0)
-        flows_perm_ax = np.pi*np.sum(fluxes_perm_ax[[0,-1],:,:]*dr_sq_perm, axis=1)
+        flows_perm_ax = np.pi*np.sum(fluxes_perm_ax*dr_sq_perm, axis=1)
         flows_perm_mem = 2.0*np.pi*self.r_f_perm[-1]*np.sum(fluxes_perm_rad[:,-1,:]*dz, axis=0)
 
         return flows_ret_ax, flows_ret_mem, flows_perm_ax, flows_perm_mem
