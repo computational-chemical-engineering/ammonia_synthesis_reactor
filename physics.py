@@ -43,6 +43,61 @@ def make_neumann_bc(flux: float) -> Dict[str, Any]:
     return {'a': 1, 'b': 0, 'd': flux}
 
 
+def get_axial_bcs_for_flow(
+    is_counter_current: bool,
+    u_ax: NDArray,
+    bc_inlet: Dict,
+    bc_outlet: Dict,
+    inflow_value: Optional[NDArray] = None,
+) -> Tuple[Dict, Dict]:
+    """Determine axial boundary conditions based on flow direction.
+
+    For counter-current: inlet at z=L, outlet at z=0
+    For co-current: inlet at z=0, outlet at z=L
+
+    Handles reverse flow at outlet by switching to Dirichlet if needed.
+
+    Args:
+        is_counter_current: True if retentate flows opposite to permeate
+        u_ax: Axial velocity at faces, shape (num_z+1, num_r)
+        bc_inlet: BC dict for inlet boundary
+        bc_outlet: BC dict for outlet boundary
+        inflow_value: Optional value for inflow BC at outlet (reverse flow).
+                      Can be scalar or array with shape matching field.
+
+    Returns:
+        Tuple of (bc_left, bc_right) for z=0 and z=L boundaries
+    """
+    # Determine extra dimensions for reshaping based on inflow_value
+    inflow_arr = np.asarray(inflow_value) if inflow_value is not None else None
+    extra_dims = max(0, inflow_arr.ndim - 2) if inflow_arr is not None else 0
+
+    if is_counter_current:
+        # Inlet at z=L (right), outlet at z=0 (left)
+        bc_left = bc_outlet  # outlet
+        bc_right = bc_inlet  # inlet
+        # Check for reverse flow at outlet (z=0)
+        is_inflow = u_ax[0, :] > 0
+        if np.any(is_inflow) and inflow_value is not None:
+            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            a_out = 1.0 - b_out
+            d_out = b_out * inflow_value
+            bc_left = {'a': a_out, 'b': b_out, 'd': d_out}
+    else:
+        # Inlet at z=0 (left), outlet at z=L (right)
+        bc_left = bc_inlet  # inlet
+        bc_right = bc_outlet  # outlet
+        # Check for reverse flow at outlet (z=L)
+        is_inflow = u_ax[-1, :] < 0
+        if np.any(is_inflow) and inflow_value is not None:
+            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            a_out = 1.0 - b_out
+            d_out = b_out * inflow_value
+            bc_right = {'a': a_out, 'b': b_out, 'd': d_out}
+
+    return bc_left, bc_right
+
+
 # =============================================================================
 # Convection residual assembly
 # =============================================================================

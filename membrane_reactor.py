@@ -15,7 +15,8 @@ from config import ReactorConfig
 from mesh import ReactorMesh
 from physics import (
     BC_NONE, BC_DIRICHLET, BC_DIRICHLET_HOM, BC_NEUMANN, BC_NEUMANN_HOM,
-    make_dirichlet_bc,
+    make_dirichlet_bc, get_axial_bcs_for_flow,
+    assemble_convection_residual,
 )
 import defaults  # Import the defaults module (still needed for reload)
 
@@ -545,76 +546,99 @@ class MembraneReactor:
 
         return self.u_perm_ax, self.u_perm_rad, self.u_ret_ax, self.u_ret_rad
     
-    def _construct_g_conv(self, c=None, compute_jac = False):
+    def _construct_g_conv(self, c=None, compute_jac=False):
         """Assemble convective species transport residual using upwind/TVD.
 
         Args:
-            c (ndarray|None): Concentration field (optional, for shape only).
+            c (ndarray|None): Concentration field (optional, defaults to self.c_p).
             compute_jac (bool): If True, compute Jacobian sparsity pattern.
 
         Returns:
             tuple: (g, jac) residual and Jacobian (or None if compute_jac=False)
         """
         if c is None:
-            c = self.c_p[...,:-1]
+            c = self.c_p[..., :-1]
 
         # Determine retentate axial BCs with inflow adjustment for reverse flow
-        if self.is_counter_current:
-            bc_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
-            is_inflow = self.u_ret_ax[0, :] > 0
-            if np.any(is_inflow):
-                b_out = (is_inflow * 1.0).reshape((1, -1, 1))
-                a_out = 1.0 - b_out
-                d_out = b_out * self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
-                bc_ret_ax = ({'a': a_out, 'b': b_out, 'd': d_out}, self.BC_NONE)
-        else:
-            bc_ret_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
-            is_inflow = self.u_ret_ax[-1, :] < 0
-            if np.any(is_inflow):
-                b_out = (is_inflow * 1.0).reshape((1, -1, 1))
-                a_out = 1.0 - b_out
-                d_out = b_out * self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
-                bc_ret_ax = (self.BC_NONE, {'a': a_out, 'b': b_out, 'd': d_out})
+        inflow_conc = self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
+        bc_ret_ax = get_axial_bcs_for_flow(
+            is_counter_current=self.is_counter_current,
+            u_ax=self.u_ret_ax,
+            bc_inlet=self.BC_NONE,
+            bc_outlet=self.BC_NEUMANN_HOM,
+            inflow_value=inflow_conc,
+        )
 
         g = np.empty(c.shape)
         g_vect = g.ravel()
 
-        c_perm = c[:, 0:self.num_r_perm, :]
+        # Permeate region convection
+        c_perm = c[:, :self.num_r_perm, :]
         u_perm_ax = self.u_perm_ax[..., np.newaxis]
         u_perm_rad = self.u_perm_rad[..., np.newaxis]
-        self.c_perm_ax, _ = interp_cntr_to_stagg_tvd(c_perm, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), v=u_perm_ax, tvd_limiter=upwind, axis=0)
+        bc_perm_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
+        bc_perm_rad = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
+
+        self.c_perm_ax, _ = interp_cntr_to_stagg_tvd(
+            c_perm, self.z_f, self.z_c, bc=bc_perm_ax, v=u_perm_ax, tvd_limiter=upwind, axis=0
+        )
         flux_perm_ax = u_perm_ax * self.c_perm_ax
         g_vect[:] = self.div_c_perm_ax @ flux_perm_ax.ravel()
-        self.c_perm_rad, _ = interp_cntr_to_stagg_tvd(c_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_perm_rad, tvd_limiter=upwind, axis=1)
+
+        self.c_perm_rad, _ = interp_cntr_to_stagg_tvd(
+            c_perm, self.r_f_perm, self.r_c_perm, bc=bc_perm_rad, v=u_perm_rad, tvd_limiter=upwind, axis=1
+        )
         flux_perm_rad = u_perm_rad * self.c_perm_rad
         g_vect[:] += self.div_c_perm_rad @ flux_perm_rad.ravel()
 
+        # Retentate region convection
         c_ret = c[:, self.num_r_perm:, :]
         u_ret_ax = self.u_ret_ax[..., np.newaxis]
         u_ret_rad = self.u_ret_rad[..., np.newaxis]
-        self.c_ret_ax, _ = interp_cntr_to_stagg_tvd(c_ret, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, tvd_limiter=upwind, axis=0)
+        bc_ret_rad = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
+
+        self.c_ret_ax, _ = interp_cntr_to_stagg_tvd(
+            c_ret, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, tvd_limiter=upwind, axis=0
+        )
         flux_ret_ax = u_ret_ax * self.c_ret_ax
         g_vect[:] += self.div_c_ret_ax @ flux_ret_ax.ravel()
 
-        self.c_ret_rad, _ = interp_cntr_to_stagg_tvd(c_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_ret_rad, tvd_limiter=upwind, axis=1)
+        self.c_ret_rad, _ = interp_cntr_to_stagg_tvd(
+            c_ret, self.r_f_ret, self.r_c_ret, bc=bc_ret_rad, v=u_ret_rad, tvd_limiter=upwind, axis=1
+        )
         flux_ret_rad = u_ret_rad * self.c_ret_rad
-        g_vect[:] += self.div_c_ret_rad @ flux_ret_rad.ravel()        
-        
+        g_vect[:] += self.div_c_ret_rad @ flux_ret_rad.ravel()
+
         if compute_jac:
-            conv_matrix_perm_ax, _ = construct_convflux_upwind(c_perm.shape, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), v=u_perm_ax, axis=0)
+            # Permeate Jacobian
+            conv_matrix_perm_ax, _ = construct_convflux_upwind(
+                c_perm.shape, self.z_f, self.z_c, bc=bc_perm_ax, v=u_perm_ax, axis=0
+            )
             jac_perm = self.div_c_perm_ax @ conv_matrix_perm_ax
-            conv_matrix_perm_rad, _ = construct_convflux_upwind(c_perm.shape, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_perm_rad, axis=1)
+            conv_matrix_perm_rad, _ = construct_convflux_upwind(
+                c_perm.shape, self.r_f_perm, self.r_c_perm, bc=bc_perm_rad, v=u_perm_rad, axis=1
+            )
             jac_perm += self.div_c_perm_rad @ conv_matrix_perm_rad
-            conv_matrix_ret_ax, _ = construct_convflux_upwind(c_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, axis=0)
+
+            # Retentate Jacobian
+            conv_matrix_ret_ax, _ = construct_convflux_upwind(
+                c_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, axis=0
+            )
             jac_ret = self.div_c_ret_ax @ conv_matrix_ret_ax
-            conv_matrix_ret_rad, _ = construct_convflux_upwind(c_ret.shape, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_ret_rad, axis=1)
+            conv_matrix_ret_rad, _ = construct_convflux_upwind(
+                c_ret.shape, self.r_f_ret, self.r_c_ret, bc=bc_ret_rad, v=u_ret_rad, axis=1
+            )
             jac_ret += self.div_c_ret_rad @ conv_matrix_ret_rad
+
+            # Remap to monolithic indices
             jac_perm = update_csc_array_indices(jac_perm, (None, c_perm.shape), (None, c.shape))
-            jac_ret = update_csc_array_indices(jac_ret, (None, c_ret.shape), (None, c.shape), offset=(None, (0,self.num_r_perm,0)))
-            jac = jac_perm + jac_ret
-            return g, jac
-        else:
-            return g, None
+            jac_ret = update_csc_array_indices(
+                jac_ret, (None, c_ret.shape), (None, c.shape),
+                offset=(None, (0, self.num_r_perm, 0))
+            )
+            return g, jac_perm + jac_ret
+
+        return g, None
            
     def _construct_g_c_p(self, c_old, T_old, dt, compute_jac=False, kinetics_as_source = False):
         """
@@ -691,7 +715,7 @@ class MembraneReactor:
         g[...,-1] = g_p
         return g, self._jac
 
-    def _construct_g_T_conv(self, T, compute_jac = False):
+    def _construct_g_T_conv(self, T, compute_jac=False):
         """Assemble convective energy residual (includes -T∇·u term).
 
         Args:
@@ -702,26 +726,18 @@ class MembraneReactor:
             tuple: (g, jac) residual and Jacobian (or None if compute_jac=False)
         """
         # Build Dirichlet BCs with temperature values
-        bc_ret_dirichlet = {'a': 0, 'b': 1, 'd': self.T_ret_in}
-        bc_perm_dirichlet = {'a': 0, 'b': 1, 'd': self.T_perm_in}
+        bc_ret_dirichlet = make_dirichlet_bc(self.T_ret_in)
+        bc_perm_dirichlet = make_dirichlet_bc(self.T_perm_in)
 
         # Determine retentate axial BCs with inflow adjustment for reverse flow
-        if self.is_counter_current:
-            bc_ret_ax = (self.BC_NEUMANN_HOM, bc_ret_dirichlet)
-            is_inflow = self.u_ret_ax[0, :] > 0
-            if np.any(is_inflow):
-                b_out = (is_inflow * 1.0).reshape((1, -1))
-                a_out = 1.0 - b_out
-                d_out = b_out * self.T_ret_in
-                bc_ret_ax = ({'a': a_out, 'b': b_out, 'd': d_out}, bc_ret_dirichlet)
-        else:
-            bc_ret_ax = (bc_ret_dirichlet, self.BC_NEUMANN_HOM)
-            is_inflow = self.u_ret_ax[-1, :] < 0
-            if np.any(is_inflow):
-                b_out = (is_inflow * 1.0).reshape((1, -1))
-                a_out = 1.0 - b_out
-                d_out = b_out * self.T_ret_in
-                bc_ret_ax = (bc_ret_dirichlet, {'a': a_out, 'b': b_out, 'd': d_out})
+        inflow_T = self.T_ret_in  # scalar for temperature
+        bc_ret_ax = get_axial_bcs_for_flow(
+            is_counter_current=self.is_counter_current,
+            u_ax=self.u_ret_ax,
+            bc_inlet=bc_ret_dirichlet,
+            bc_outlet=self.BC_NEUMANN_HOM,
+            inflow_value=inflow_T,
+        )
 
         g = np.empty(T.shape)
         g_vect = g.ravel()
