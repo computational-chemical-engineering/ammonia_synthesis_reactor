@@ -296,3 +296,76 @@ def assemble_temperature_convection(
         return g, jac
 
     return g, None
+
+
+# =============================================================================
+# Permeability and flow resistance (Darcy/Ergun)
+# =============================================================================
+
+# Ergun equation coefficients for packed bed pressure drop
+ERGUN_VISCOUS_COEFF = 150.0   # Viscous term coefficient
+ERGUN_INERTIAL_COEFF = 1.75   # Inertial term coefficient
+
+# Permeability model constants
+PERM_RAD_FACTOR = 10.0        # Radial permeability multiplier for permeate
+HAGEN_POISEUILLE_COEFF = 0.25 # Coefficient in Hagen-Poiseuille law
+
+
+def compute_permeate_permeability(
+    r_max_perm: float,
+    r_c: NDArray,
+    viscosity: NDArray,
+) -> Tuple[NDArray, NDArray]:
+    """Compute permeability field for permeate side (Hagen-Poiseuille).
+
+    Args:
+        r_max_perm: Maximum permeate radius
+        r_c: Radial cell centers, shape (num_r,)
+        viscosity: Dynamic viscosity field, shape (num_z, num_r)
+
+    Returns:
+        Tuple of (k_axial, k_radial) permeability fields.
+    """
+    # Axial: parabolic velocity profile
+    k_axial = HAGEN_POISEUILLE_COEFF * (r_max_perm**2 - r_c**2).reshape((1, -1)) / viscosity
+    # Radial: enhanced permeability
+    k_radial = PERM_RAD_FACTOR * r_max_perm**2 / viscosity
+    return k_axial, k_radial
+
+
+def compute_packed_bed_permeability(
+    viscosity: NDArray,
+    density: NDArray,
+    u_abs: NDArray,
+    eps: float,
+    dp: float,
+) -> NDArray:
+    """Compute permeability field for packed bed (Ergun equation).
+
+    The Ergun equation relates pressure drop to velocity:
+        dP/dz = (beta_0 + beta_1) * u
+
+    where:
+        beta_0 = 150 * (1-eps)^2 * mu / (eps^3 * dp^2)  (viscous)
+        beta_1 = 1.75 * rho * (1-eps) * |u| / (eps^3 * dp)  (inertial)
+
+    Args:
+        viscosity: Dynamic viscosity field, shape (num_z, num_r)
+        density: Gas density field, shape (num_z, num_r)
+        u_abs: Absolute velocity magnitude, shape (num_z, num_r)
+        eps: Bed voidage (porosity)
+        dp: Particle diameter
+
+    Returns:
+        Permeability field (1/beta), shape (num_z, num_r).
+    """
+    eps3 = eps**3
+    one_minus_eps = 1 - eps
+
+    # Viscous resistance (Darcy term)
+    beta_0 = ERGUN_VISCOUS_COEFF * one_minus_eps**2 * viscosity / (eps3 * dp**2)
+
+    # Inertial resistance (Forchheimer term)
+    beta_1 = ERGUN_INERTIAL_COEFF * density * one_minus_eps * u_abs / (eps3 * dp)
+
+    return 1.0 / (beta_0 + beta_1)

@@ -17,6 +17,8 @@ from physics import (
     BC_NONE, BC_DIRICHLET, BC_DIRICHLET_HOM, BC_NEUMANN, BC_NEUMANN_HOM,
     make_dirichlet_bc, get_axial_bcs_for_flow,
     assemble_convection_residual,
+    compute_permeate_permeability, compute_packed_bed_permeability,
+    HAGEN_POISEUILLE_COEFF, PERM_RAD_FACTOR,
 )
 import defaults  # Import the defaults module (still needed for reload)
 
@@ -396,37 +398,43 @@ class MembraneReactor:
     def _construct_darcy_matrices(self, c=None, T=None, p=None):
         """Assemble permeability-weighted matrices for velocity (Darcy / Ergun).
 
-        Returns:
-            csc_matrix|None: Pressure Jacobian contribution if compute_jac.
+        Uses Hagen-Poiseuille for permeate side and Ergun equation for packed bed.
         """
         if c is None:
-            c = self.c_p[...,:-1]
+            c = self.c_p[..., :-1]
         if T is None:
             T = self.T
         if p is None:
-            p = self.c_p[...,-1]
+            p = self.c_p[..., -1]
         c_perm, c_ret = self._split_perm_and_ret(c)
         T_perm, T_ret = self._split_perm_and_ret(T)
         p_perm, p_ret = self._split_perm_and_ret(p)
 
-        viscosity = self.correlation.viscosity(c_perm, T_perm)
-        k_field = HAGEN_POISEUILLE_COEFF*(self.r_max_perm**2-self.r_c_perm**2).reshape((1, -1))/viscosity
-        k_field_perm_ax = interp_cntr_to_stagg(k_field, x_f=self.z_f, x_c=self.z_c, axis=0)
-        self.k_matrix_perm_ax = construct_coefficient_matrix(k_field_perm_ax, (self.num_z, self.num_r_perm), axis=0)       
-        k_field = PERM_RAD_FACTOR*self.r_max_perm**2/viscosity
-        k_field_perm_rad = interp_cntr_to_stagg(k_field, x_f=self.r_f_perm, x_c=self.r_c_perm, axis=1)
-        self.k_matrix_perm_rad = construct_coefficient_matrix(k_field_perm_rad, (self.num_z, self.num_r_perm), axis=1)
-        
-        viscosity = self.correlation.viscosity(c_ret, T_ret)
-        rho = self.correlation.density(c_ret, T_ret, p_ret)
+        # Permeate side: Hagen-Poiseuille
+        viscosity_perm = self.correlation.viscosity(c_perm, T_perm)
+        k_perm_ax, k_perm_rad = compute_permeate_permeability(
+            self.r_max_perm, self.r_c_perm, viscosity_perm
+        )
+        k_field_perm_ax = interp_cntr_to_stagg(k_perm_ax, x_f=self.z_f, x_c=self.z_c, axis=0)
+        self.k_matrix_perm_ax = construct_coefficient_matrix(
+            k_field_perm_ax, (self.num_z, self.num_r_perm), axis=0
+        )
+        k_field_perm_rad = interp_cntr_to_stagg(k_perm_rad, x_f=self.r_f_perm, x_c=self.r_c_perm, axis=1)
+        self.k_matrix_perm_rad = construct_coefficient_matrix(
+            k_field_perm_rad, (self.num_z, self.num_r_perm), axis=1
+        )
+
+        # Retentate side: Ergun equation for packed bed
+        viscosity_ret = self.correlation.viscosity(c_ret, T_ret)
+        rho_ret = self.correlation.density(c_ret, T_ret, p_ret)
         u_ax_abs = np.abs(interp_stagg_to_cntr(self.u_ret_ax, self.z_f, self.z_c, axis=0))
-        beta_0 = ERGUN_VISCOUS_COEFF * (1-self.eps)**2*viscosity / (self.eps**3 * self.dp**2)
-        beta_1 = ERGUN_INERTIAL_COEFF * rho *(1-self.eps) * np.abs(u_ax_abs) / (self.eps**3 * self.dp)
-        beta_inv = 1.0/(beta_0 + beta_1)
+        k_ret = compute_packed_bed_permeability(
+            viscosity_ret, rho_ret, u_ax_abs, self.eps, self.dp
+        )
         shape_p_ret = (self.num_z, self.num_r_ret)
-        k_field_ret_ax = interp_cntr_to_stagg(beta_inv, x_f=self.z_f, x_c=self.z_c, axis=0)
+        k_field_ret_ax = interp_cntr_to_stagg(k_ret, x_f=self.z_f, x_c=self.z_c, axis=0)
         self.k_matrix_ret_ax = construct_coefficient_matrix(k_field_ret_ax, shape_p_ret, axis=0)
-        k_field_ret_rad = interp_cntr_to_stagg(beta_inv, x_f=self.r_f_ret, x_c=self.r_c_ret, axis=1)
+        k_field_ret_rad = interp_cntr_to_stagg(k_ret, x_f=self.r_f_ret, x_c=self.r_c_ret, axis=1)
         self.k_matrix_ret_rad = construct_coefficient_matrix(k_field_ret_rad, shape_p_ret, axis=1)
 
     def _construct_jac_darcy(self):
