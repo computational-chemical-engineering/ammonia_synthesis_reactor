@@ -11,7 +11,28 @@ from scipy.sparse import csc_array
 from pymrm import non_uniform_grid, construct_coefficient_matrix, construct_grad, construct_div, construct_convflux_upwind, interp_cntr_to_stagg_tvd, upwind, update_csc_array_indices, interp_cntr_to_stagg, interp_stagg_to_cntr, compute_boundary_values, construct_boundary_value_matrices, construct_interface_matrices, NumJac, clip_approach
 from gas_mixture_correlations import GasMixtureCorrelations
 from ammonia_synthesis_kinetics import AmmoniaSynthesisKinetics
-import defaults  # Import the defaults module
+from config import ReactorConfig
+from mesh import ReactorMesh
+import defaults  # Import the defaults module (still needed for reload)
+
+# =============================================================================
+# Physical and numerical constants
+# =============================================================================
+
+# Ergun equation coefficients for packed bed pressure drop
+ERGUN_VISCOUS_COEFF = 150.0   # Viscous pressure drop coefficient
+ERGUN_INERTIAL_COEFF = 1.75   # Inertial pressure drop coefficient
+
+# Numerical solver constants
+CFL_INIT = 0.1                # Initial CFL number for timestep selection
+EPS_CHEM_TIMESTEP = 1e-8      # Small epsilon for chemical timestep calculation
+MAX_DT_PER_STEP = 500.0       # Maximum temperature change per solve step [K]
+ARMIJO_COEFF = 1e-4           # Armijo sufficient decrease condition
+MIN_LINE_SEARCH_ALPHA = 1e-3  # Minimum step size before line search fails
+
+# Permeability model constants
+PERM_RAD_FACTOR = 10.0        # Radial permeability multiplier for permeate
+HAGEN_POISEUILLE_COEFF = 0.25 # Coefficient in Hagen-Poiseuille law
 
 class TestKinetics:
     def __init__(self, T=None, p=None):
@@ -46,6 +67,17 @@ class MembraneReactor:
     regions on non-uniform grids. Supports continuation and pseudo‑transient
     strategies for robust steady-state convergence.
     """
+
+    # =========================================================================
+    # Standard boundary condition templates
+    # =========================================================================
+    # These dictionaries define the coefficients for Robin-type BCs: a*grad(u) + b*u = d
+    BC_NONE = {'a': 0, 'b': 0, 'd': 0}           # No boundary (internal face)
+    BC_DIRICHLET_HOM = {'a': 0, 'b': 1, 'd': 0}  # Homogeneous Dirichlet: u = 0
+    BC_NEUMANN_HOM = {'a': 1, 'b': 0, 'd': 0}    # Homogeneous Neumann: grad(u) = 0
+    BC_DIRICHLET = {'a': 0, 'b': 1, 'd': 1}      # Dirichlet with placeholder value
+    BC_NEUMANN = {'a': 1, 'b': 0, 'd': 1}        # Neumann with placeholder value
+
     def __init__(self, config_file=None, c=None, p=None, T=None, **kwargs):
         """Construct reactor, load defaults, apply overrides, allocate fields.
 
@@ -60,81 +92,74 @@ class MembraneReactor:
             Creates spatial discretization, initializes kinetics & Jacobian
             matrices, performs a non-reactive pressure/velocity initialization.
         """
-
-        # Step 1: Load defaults from the Python module
-        importlib.reload(defaults)
-        param_dict = defaults.DEFAULTS.copy()  # Copy to avoid modifying the original
-
-        # Step 2: Load user-supplied settings from a JSON file (if provided)
-        if config_file and os.path.exists(config_file):
-            with open(config_file, "r") as f:
-                user_config = json.load(f)
-            param_dict.update(user_config)  # Override defaults with user values
-
-        # Step 3: Override with explicitly provided kwargs
-        param_dict.update(kwargs)
-
-        # Assign attributes
-        for key, value in param_dict.items():
-            setattr(self, key, value)
-        self.param_dict = param_dict
-        
-        # Step 4: Load user-supplied settings from a CSV file (if provided)
-        if config_file and os.path.exists(config_file):
-            with open(config_file, "r") as f:
-                user_config = json.load(f)
-            param_dict.update(user_config)  # Override defaults with user values
-
-        # Step 5: Override with explicitly provided kwargs
-        param_dict.update(kwargs)
-
-        # Assign attributes
-        for key, value in param_dict.items():
-            setattr(self, key, value)
-
-        self.init_derived_parameters()
-        self.init_fields(c, p, T)
-        _, T_ret = self.split_perm_and_ret(self.T)
-        _, p_ret = self.split_perm_and_ret(self.c_p[...,-1])
+        self._init_config(config_file, kwargs)
+        self._init_derived_parameters()
+        self._init_fields(c, p, T)
+        _, T_ret = self._split_perm_and_ret(self.T)
+        _, p_ret = self._split_perm_and_ret(self.c_p[..., -1])
 
         self.kinetics = AmmoniaSynthesisKinetics(self.species, T=T_ret, p=p_ret, rho_b=self.rho_b, rho_c=self.rho_c)
-        #self.kinetics = TestKinetics(T=T_ret, p=p_ret)
-        self.init_jac()
-        self.factor_norm_c = (self.c_p[...,:-1].size)**(-1.0/self.ord_norm)
-        self.factor_norm_p = (self.c_p[...,-1].size)**(-1.0/self.ord_norm)
-        self.init_c_p()
-        
-    def init_c_p(self):
-        CLF = 1e-1
-        dz_cell = np.min(self.z_f[1:] - self.z_f[:-1])
-        u_max = np.maximum(np.max(np.abs(self.u_perm_ax)), np.max(np.abs(self.u_ret_ax)))
-        dt_small = CLF * dz_cell / u_max
-        self.solve(num_timesteps=2, dt=dt_small)
+        self._init_jac()
+        self.factor_norm_c = (self.c_p[..., :-1].size) ** (-1.0 / self.ord_norm)
+        self.factor_norm_p = (self.c_p[..., -1].size) ** (-1.0 / self.ord_norm)
 
-    def init_derived_parameters(self):
+        dt_cfl = self._compute_dt_cfl(cfl = CFL_INIT)
+        self.solve(num_timesteps=2, dt=dt_cfl)
+
+    def _init_config(self, config_file, kwargs):
+        """Load and merge configuration from defaults, file, and kwargs.
+
+        Configuration is applied in order of increasing priority:
+        1. Default values from defaults.DEFAULTS
+        2. Values from JSON config file (if provided)
+        3. Explicit kwargs (highest priority)
+
+        Args:
+            config_file (str|None): Path to JSON configuration file.
+            kwargs (dict): Explicit parameter overrides.
+
+        Side Effects:
+            Sets all configuration parameters as instance attributes.
+            Stores merged dict as self.param_dict for serialization.
+        """
+        importlib.reload(defaults)
+
+        # Create ReactorConfig (handles merging and validation)
+        self._config = ReactorConfig.from_defaults(config_file, **kwargs)
+
+        # Copy all config attributes to self for backward compatibility
+        # Include callables like Nu_ret, Nu_perm (Nusselt correlations)
+        from dataclasses import fields as dataclass_fields
+        for f in dataclass_fields(self._config):
+            setattr(self, f.name, getattr(self._config, f.name))
+
+        # Store param_dict for serialization (legacy)
+        self.param_dict = self._config.to_dict()
+
+    def _init_derived_parameters(self):
         """Compute geometry-dependent counts, densities, permeabilities & inlets.
 
         Populates:
             num_r_perm / num_r_ret, membrane permeability
             array (self.perm), inlet flux distributions, Reynolds/Schmidt groups.
         """
-        self.y_ret_in = np.asarray(self.y_ret_in, dtype=np.float64).reshape((1,1,-1))  # Convert to numpy array
-        self.y_perm_in = np.asarray(self.y_perm_in, dtype=np.float64).reshape((1,1,-1))  # Convert to numpy array
-        self.y_ret_init = np.asarray(self.y_ret_init, dtype=np.float64).reshape((1,1,-1))  # Convert to numpy array
-        self.y_perm_init = np.asarray(self.y_perm_init, dtype=np.float64).reshape((1,1,-1))  # Convert to numpy array
+        # y_* arrays are already reshaped by ReactorConfig
 
-        self.num_c = len(self.species)
-        self.rho_b = self.rho_c*self.Dcat*(1-self.eps) #[Kgcat/m3R] bed density    
-        
+        self.num_c = self._config.num_c
+        self.rho_b = self._config.rho_b
+
         self.correlation = GasMixtureCorrelations(self.species, self.database)
-        
-        self.num_r_perm = np.round(self.r_max_perm / self.r_max *self.num_r).astype('int') + 3
-        self.num_r_ret = self.num_r - self.num_r_perm
-        if (self.num_r_ret < 2):
-            self.num_r_ret = 2
-            self.num_r_perm = self.num_r - self.num_r_ret
 
-        self.create_spatial_discretization()
+        # Create mesh and copy grid attributes for backward compatibility
+        self._mesh = ReactorMesh(self._config)
+        self.num_r_perm = self._mesh.num_r_perm
+        self.num_r_ret = self._mesh.num_r_ret
+        self.r_f_ret = self._mesh.r_f_ret
+        self.r_c_ret = self._mesh.r_c_ret
+        self.r_f_perm = self._mesh.r_f_perm
+        self.r_c_perm = self._mesh.r_c_perm
+        self.z_f = self._mesh.z_f
+        self.z_c = self._mesh.z_c
 
         # membrane permeabilities
         perm_dict= {'NH3': self.Perm_NH3, 'H2': self.Perm_NH3 / self.Sel_am_hy, 'N2': self.Perm_NH3 / self.Sel_am_ni}
@@ -147,9 +172,6 @@ class MembraneReactor:
             perm = perm.copy()
             perm[fltr,:] = 0
         self.perm = perm
-
-        # Bed and Catalyst Density
-        self.rho_b = self.rho_c * self.Dcat * (1 - self.eps)
 
         # reactor geometry
         #self.Pm = np.pi * self.r_min  # Membrane circumference [m]
@@ -174,26 +196,7 @@ class MembraneReactor:
 
         self.conv_factor_min = math.exp(-self.newton_conv_rate_min)
 
-    def create_spatial_discretization(self):
-        # Time-Stepping
-        #self.num_time_steps = int(np.round(self.L / self.u0 / self.dt * 5))
-        # create grid
-        # self.r_f_ret = np.linspace(self.r_min, self.r_max, self.num_r+1)
-        self.r_f_ret = non_uniform_grid(self.r_min, self.r_max, self.num_r_ret+1, (self.r_max - self.r_min)/np.maximum(self.num_r_ret-10, 0.8*self.num_r_ret), 1.2)
-        self.r_c_ret = 0.5 * (self.r_f_ret[0:-1] + self.r_f_ret[1:])
-        # self.r_f_perm = np.linspace(self.r_min_perm, self.r_max_perm, self.num_r_perm+1)
-        self.r_f_perm = non_uniform_grid(self.r_min_perm, self.r_max_perm, self.num_r_perm+1, (self.r_max_perm - self.r_min_perm)/np.maximum(self.num_r_perm-10, 0.8*self.num_r_perm), 1.0/1.2)
-        self.r_c_perm = 0.5 * (self.r_f_perm[0:-1] + self.r_f_perm[1:])
-        # uniform until sealing, then non-uniform
-        num_z_sealing = int(np.round(self.Lsealing / self.L * self.num_z))
-        z_f_uniform = np.linspace(0, self.Lsealing, num_z_sealing+1)     
-        z_f_non_uniform = non_uniform_grid(self.Lsealing, self.L, self.num_z+1-num_z_sealing, (self.L - self.Lsealing)/np.maximum(self.num_z-num_z_sealing-8, 0.8*(self.num_z-num_z_sealing)), 1.2)
-        self.z_f = np.concatenate((z_f_uniform, z_f_non_uniform[1:]), axis=0)
-        #self.z_f = np.linspace(0, self.L, self.num_z+1)
-        #self.z_f = non_uniform_grid(0, self.L, self.num_z+1, self.L / np.maximum(self.num_z-10, 0.8*self.num_z), 1.2)
-        self.z_c = 0.5 * (self.z_f[0:-1] + self.z_f[1:])
-
-    def init_fields(self, c=None, p=None, T=None):
+    def _init_fields(self, c=None, p=None, T=None):
         """
         Initialize the concentration field.
         """
@@ -254,12 +257,12 @@ class MembraneReactor:
         self.u_ret_rad = np.zeros((self.num_z, self.num_r_ret+1))
         self.div_u = np.zeros((self.num_z, self.num_r))
 
-        self.cnt_c_p = 0
-        self.cnt_T = 0
+        self.cnt_num_solves_c_p = 0
+        self.cnt_num_solves_T = 0
 
         return self.c_p, self.T
 
-    def init_jac(self):
+    def _init_jac(self):
         """
         Initialize the Jacobian matrices for the system. 
         This includes setting up the accumulation, convection, and diffusion terms.
@@ -271,30 +274,19 @@ class MembraneReactor:
         shape_p_ret = (self.num_z, self.num_r_ret)
         shape_p_perm = (self.num_z, self.num_r_perm)
        
-        bc_none = {'a': 0, 'b': 0, 'd': 0}      
-        bc_dirichlet_hom = {'a': 0, 'b':1 , 'd' : 0}
-        bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
-        bc_dirichlet = {'a': 0, 'b':1 , 'd' : 1}
-        bc_neumann = {'a': 1, 'b':0 , 'd' : 1}
-        if (self.is_counter_current):
-            bc_ret_ax = (bc_neumann_hom, bc_none)
-            bc_p_ret_ax = (bc_dirichlet, bc_none)
-            bc_T_ret_ax = (bc_neumann_hom, bc_dirichlet)
-        else:
-            bc_ret_ax=(bc_none, bc_neumann_hom)  
-            bc_p_ret_ax = (bc_none, bc_dirichlet)  
-            bc_T_ret_ax = (bc_dirichlet, bc_neumann_hom)
-        
+        # Get flow-direction-dependent boundary conditions
+        bc_ret_ax, bc_p_ret_ax, bc_T_ret_ax = self._get_axial_bcs_for_flow_direction()
+
         jac_c_accum_perm = construct_coefficient_matrix(1.0, shape_c_perm)
         jac_c_accum_ret = construct_coefficient_matrix(self.eps, shape_c_ret)
         self.div_c_perm_ax  = construct_div(shape_c_perm, self.z_f, nu=0, axis=0)
         self.div_c_perm_rad = construct_div(shape_c_perm, self.r_f_perm, nu=self.nu, axis=1)
         self.div_c_ret_ax  = construct_div(shape_c_ret, self.z_f, nu=0, axis=0)
         self.div_c_ret_rad = construct_div(shape_c_ret, self.r_f_ret, nu=self.nu, axis=1)
-        self.grad_c_perm_ax, self.grad_bc_c_perm_ax   = construct_grad(shape_c_perm, self.z_f, self.z_c, bc=(bc_none, bc_neumann_hom), axis=0)
-        self.grad_c_perm_rad, _ = construct_grad(shape_c_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_none), axis=1)
-        self.grad_c_ret_ax, self.grad_bc_c_ret_ax   = construct_grad(shape_c_ret, self.z_f, self.z_c, bc_ret_ax, axis=0)
-        self.grad_c_ret_rad, _ = construct_grad(shape_c_ret, self.r_f_ret, self.r_c_ret, bc=(bc_none, bc_neumann_hom), axis=1)
+        self.grad_c_perm_ax, self.grad_bc_c_perm_ax = construct_grad(shape_c_perm, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), axis=0)
+        self.grad_c_perm_rad, _ = construct_grad(shape_c_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NONE), axis=1)
+        self.grad_c_ret_ax, self.grad_bc_c_ret_ax = construct_grad(shape_c_ret, self.z_f, self.z_c, bc_ret_ax, axis=0)
+        self.grad_c_ret_rad, _ = construct_grad(shape_c_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), axis=1)
         self.c_matrix_perm_mem, _ = construct_boundary_value_matrices(shape_c_perm, self.r_f_perm, self.r_c_perm, bc=None, bound_id=1, axis=1)
         self.c_matrix_ret_mem, _ = construct_boundary_value_matrices(shape_c_ret, self.r_f_ret, self.r_c_ret, bc=None, bound_id=0, axis=1)
 
@@ -302,20 +294,20 @@ class MembraneReactor:
         self.div_p_perm_rad = construct_div(shape_p_perm, self.r_f_perm, nu=self.nu, axis=1)
         self.div_p_ret_ax  = construct_div(shape_p_ret, self.z_f, nu=0, axis=0)
         self.div_p_ret_rad = construct_div(shape_p_ret, self.r_f_ret, nu=self.nu, axis=1)
-        self.grad_p_perm_ax, self.grad_bc_p_perm_ax   = construct_grad(shape_p_perm, self.z_f, self.z_c, bc=(bc_none, bc_dirichlet), axis=0)
+        self.grad_p_perm_ax, self.grad_bc_p_perm_ax = construct_grad(shape_p_perm, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_DIRICHLET), axis=0)
         self.grad_bc_p_perm_ax *= self.p_perm_out
-        self.grad_p_perm_rad, _ = construct_grad(shape_p_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        self.grad_p_perm_rad, _ = construct_grad(shape_p_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), axis=1)
         self.grad_p_ret_ax, self.grad_bc_p_ret_ax = construct_grad(shape_p_ret, self.z_f, self.z_c, bc=bc_p_ret_ax, axis=0)
         self.grad_bc_p_ret_ax *= self.p_ret_out
-        self.grad_p_ret_rad, _ = construct_grad(shape_p_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        self.grad_p_ret_rad, _ = construct_grad(shape_p_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), axis=1)
         
         self.jac_T_accum = construct_coefficient_matrix(1.0, shape_p)
-        self.grad_T_perm_ax, self.grad_bc_T_perm_ax   = construct_grad(shape_p_perm, self.z_f, self.z_c, bc=(bc_dirichlet, bc_neumann_hom), axis=0)
+        self.grad_T_perm_ax, self.grad_bc_T_perm_ax = construct_grad(shape_p_perm, self.z_f, self.z_c, bc=(self.BC_DIRICHLET, self.BC_NEUMANN_HOM), axis=0)
         self.grad_bc_T_perm_ax *= self.T_perm_in
-        self.grad_T_perm_rad, _, self.grad_bc_T_perm_rad = construct_grad(shape_p_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_dirichlet), axis=1, shapes_d = (None, (self.num_z, 1)))
-        self.grad_T_ret_ax, self.grad_bc_T_ret_ax   = construct_grad(shape_p_ret, self.z_f, self.z_c, bc_T_ret_ax, axis=0)
+        self.grad_T_perm_rad, _, self.grad_bc_T_perm_rad = construct_grad(shape_p_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_DIRICHLET), axis=1, shapes_d=(None, (self.num_z, 1)))
+        self.grad_T_ret_ax, self.grad_bc_T_ret_ax = construct_grad(shape_p_ret, self.z_f, self.z_c, bc_T_ret_ax, axis=0)
         self.grad_bc_T_ret_ax *= self.T_ret_in
-        self.grad_T_ret_rad, self.grad_bc_T_ret_rad, _ = construct_grad(shape_p_ret, self.r_f_ret, self.r_c_ret, bc=(bc_dirichlet, bc_neumann_hom), axis=1, shapes_d = ((self.num_z, 1), None))
+        self.grad_T_ret_rad, self.grad_bc_T_ret_rad, _ = construct_grad(shape_p_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_DIRICHLET, self.BC_NEUMANN_HOM), axis=1, shapes_d=((self.num_z, 1), None))
         
         
         # shift retentate-side matrix indices to (later) build a monolithic spatial discretization
@@ -348,7 +340,7 @@ class MembraneReactor:
         self.grad_T_ret_rad  = update_csc_array_indices(self.grad_T_ret_rad, (None, shape_p_ret), (None, shape_p), offset=(None, offset_p))
         self.grad_T_perm_ax   = update_csc_array_indices(self.grad_T_perm_ax, (None, shape_p_perm), (None, shape_p))
         self.grad_T_perm_rad  = update_csc_array_indices(self.grad_T_perm_rad, (None, shape_p_perm), (None, shape_p))
-        self.construct_darcy_matrices()
+        self._construct_darcy_matrices()
 
         self.numjac = NumJac(shape_c_ret)
         self.numjac_p = NumJac(shape_p + (1,))
@@ -361,25 +353,42 @@ class MembraneReactor:
 
         self._jac = None
             
-    def split_perm_and_ret(self, c):
+    def _split_perm_and_ret(self, c):
         """Split full field into permeate and retentate views.
 
         Args:
-            c (ndarray): Field.
+            c (ndarray): Field with shape (num_z, num_r, ...).
 
         Returns:
             tuple: (c_perm, c_ret) views/slices.
         """
         c = np.asarray(c)
         if c.ndim > 1 and c.shape[1] == self.num_r:
-            c_perm = c[:, 0:self.num_r_perm, ...]
-            c_ret = c[:, self.num_r_perm:self.num_r, ...]
-        else:
-            c_perm = c
-            c_ret = c
-        return c_perm, c_ret
+            return self._mesh.split_perm_ret(c)
+        # Fallback for non-conforming arrays
+        return c, c
 
-    def construct_darcy_matrices(self, c=None, T=None, p=None):
+    def _get_axial_bcs_for_flow_direction(self):
+        """Return boundary condition tuples based on flow direction.
+
+        For co-current flow, inlet is at z=0 and outlet at z=L.
+        For counter-current flow, retentate inlet is at z=L and outlet at z=0.
+
+        Returns:
+            tuple: (bc_c_ret_ax, bc_p_ret_ax, bc_T_ret_ax) boundary conditions
+                   for concentration, pressure, and temperature on retentate side.
+        """
+        if self.is_counter_current:
+            bc_c_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
+            bc_p_ret_ax = (self.BC_DIRICHLET, self.BC_NONE)
+            bc_T_ret_ax = (self.BC_NEUMANN_HOM, self.BC_DIRICHLET)
+        else:
+            bc_c_ret_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
+            bc_p_ret_ax = (self.BC_NONE, self.BC_DIRICHLET)
+            bc_T_ret_ax = (self.BC_DIRICHLET, self.BC_NEUMANN_HOM)
+        return bc_c_ret_ax, bc_p_ret_ax, bc_T_ret_ax
+
+    def _construct_darcy_matrices(self, c=None, T=None, p=None):
         """Assemble permeability-weighted matrices for velocity (Darcy / Ergun).
 
         Returns:
@@ -391,23 +400,23 @@ class MembraneReactor:
             T = self.T
         if p is None:
             p = self.c_p[...,-1]
-        c_perm, c_ret = self.split_perm_and_ret(c)
-        T_perm, T_ret = self.split_perm_and_ret(T)
-        p_perm, p_ret = self.split_perm_and_ret(p)
+        c_perm, c_ret = self._split_perm_and_ret(c)
+        T_perm, T_ret = self._split_perm_and_ret(T)
+        p_perm, p_ret = self._split_perm_and_ret(p)
 
         viscosity = self.correlation.viscosity(c_perm, T_perm)
-        k_field =  0.25*(self.r_max_perm**2-self.r_c_perm**2).reshape((1, -1))/viscosity
+        k_field = HAGEN_POISEUILLE_COEFF*(self.r_max_perm**2-self.r_c_perm**2).reshape((1, -1))/viscosity
         k_field_perm_ax = interp_cntr_to_stagg(k_field, x_f=self.z_f, x_c=self.z_c, axis=0)
         self.k_matrix_perm_ax = construct_coefficient_matrix(k_field_perm_ax, (self.num_z, self.num_r_perm), axis=0)       
-        k_field   = 1e1*self.r_max_perm**2/viscosity
+        k_field = PERM_RAD_FACTOR*self.r_max_perm**2/viscosity
         k_field_perm_rad = interp_cntr_to_stagg(k_field, x_f=self.r_f_perm, x_c=self.r_c_perm, axis=1)
         self.k_matrix_perm_rad = construct_coefficient_matrix(k_field_perm_rad, (self.num_z, self.num_r_perm), axis=1)
         
         viscosity = self.correlation.viscosity(c_ret, T_ret)
         rho = self.correlation.density(c_ret, T_ret, p_ret)
         u_ax_abs = np.abs(interp_stagg_to_cntr(self.u_ret_ax, self.z_f, self.z_c, axis=0))
-        beta_0 = 150.0 * (1-self.eps)**2*viscosity / (self.eps**3 * self.dp**2) 
-        beta_1 = 1.75 * rho *(1-self.eps) * np.abs(u_ax_abs) / (self.eps**3 * self.dp)
+        beta_0 = ERGUN_VISCOUS_COEFF * (1-self.eps)**2*viscosity / (self.eps**3 * self.dp**2)
+        beta_1 = ERGUN_INERTIAL_COEFF * rho *(1-self.eps) * np.abs(u_ax_abs) / (self.eps**3 * self.dp)
         beta_inv = 1.0/(beta_0 + beta_1)
         shape_p_ret = (self.num_z, self.num_r_ret)
         k_field_ret_ax = interp_cntr_to_stagg(beta_inv, x_f=self.z_f, x_c=self.z_c, axis=0)
@@ -415,7 +424,7 @@ class MembraneReactor:
         k_field_ret_rad = interp_cntr_to_stagg(beta_inv, x_f=self.r_f_ret, x_c=self.r_c_ret, axis=1)
         self.k_matrix_ret_rad = construct_coefficient_matrix(k_field_ret_rad, shape_p_ret, axis=1)
 
-    def construct_jac_darcy(self):
+    def _construct_jac_darcy(self):
         """Assemble permeability-weighted matrices for velocity (Darcy / Ergun).
 
         Returns:
@@ -435,7 +444,7 @@ class MembraneReactor:
         jac_darcy += self.div_c_ret_rad @ ((-ck_matrix) @ self.grad_p_ret_rad)
         return jac_darcy
 
-    def construct_g_diff(self, c = None, T = None, p = None, compute_jac = False):
+    def _construct_g_diff(self, c = None, T = None, p = None, compute_jac = False):
         """
         Update the transport coefficients based on the current concentration field.
 
@@ -450,9 +459,9 @@ class MembraneReactor:
             T = self.T
         if p is None:
             p = self.c_p[...,-1]    
-        c_perm, c_ret = self.split_perm_and_ret(c)
-        T_perm, T_ret = self.split_perm_and_ret(T)
-        p_perm, p_ret = self.split_perm_and_ret(p)
+        c_perm, c_ret = self._split_perm_and_ret(c)
+        T_perm, T_ret = self._split_perm_and_ret(T)
+        p_perm, p_ret = self._split_perm_and_ret(p)
     
        # Retentate side
         g = np.empty(c.shape)
@@ -500,7 +509,7 @@ class MembraneReactor:
         g_vect[...] = self.g_bc_c_diff + self.jac_c_diff @ c.reshape((-1,1))
         return g, self.jac_c_diff
     
-    def update_velocity_fields(self, p=None):
+    def _update_velocity_fields(self, p=None):
         """Update staggered velocity arrays from current pressure gradients.
 
         Returns:
@@ -532,7 +541,7 @@ class MembraneReactor:
 
         return self.u_perm_ax, self.u_perm_rad, self.u_ret_ax, self.u_ret_rad
     
-    def construct_g_conv(self, c=None, compute_jac = False):
+    def _construct_g_conv(self, c=None, compute_jac = False):
         """Assemble convective species transport residual using upwind/TVD.
 
         Args:
@@ -544,57 +553,57 @@ class MembraneReactor:
         """
         if c is None:
             c = self.c_p[...,:-1]
-        bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
-        bc_none = {'a': 0, 'b': 0, 'd': 0}
-        if (self.is_counter_current):
-            bc_ret_ax = (bc_neumann_hom, bc_none)
-            is_inflow = self.u_ret_ax[0,:] > 0 
-            if (np.any(is_inflow)):
-                b_out = (is_inflow*1.0).reshape((1,-1,1))
-                a_out = (1.0-b_out)
-                d_out = b_out*self.p_ret_out/(self.Rg*self.T_ret_in)*np.array([[[0.0,1.0,0.0]]])
-                bc_ret_ax = ({'a':a_out, 'b':b_out, 'd':d_out},bc_none)
+
+        # Determine retentate axial BCs with inflow adjustment for reverse flow
+        if self.is_counter_current:
+            bc_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
+            is_inflow = self.u_ret_ax[0, :] > 0
+            if np.any(is_inflow):
+                b_out = (is_inflow * 1.0).reshape((1, -1, 1))
+                a_out = 1.0 - b_out
+                d_out = b_out * self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
+                bc_ret_ax = ({'a': a_out, 'b': b_out, 'd': d_out}, self.BC_NONE)
         else:
-            bc_ret_ax = (bc_none, bc_neumann_hom)
-            is_inflow = self.u_ret_ax[-1,:] < 0
-            if (np.any(is_inflow)):
-                b_out = (is_inflow*1.0).reshape((1,-1,1))
-                a_out = (1.0-b_out)
-                d_out = b_out*self.p_ret_out/(self.Rg*self.T_ret_in)*np.array([[[0.0,1.0,0.0]]])
-                bc_ret_ax = (bc_none, {'a':a_out, 'b':b_out, 'd':d_out})
-        
+            bc_ret_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
+            is_inflow = self.u_ret_ax[-1, :] < 0
+            if np.any(is_inflow):
+                b_out = (is_inflow * 1.0).reshape((1, -1, 1))
+                a_out = 1.0 - b_out
+                d_out = b_out * self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
+                bc_ret_ax = (self.BC_NONE, {'a': a_out, 'b': b_out, 'd': d_out})
+
         g = np.empty(c.shape)
         g_vect = g.ravel()
-        
+
         c_perm = c[:, 0:self.num_r_perm, :]
-        u_perm_ax = self.u_perm_ax[...,np.newaxis]
-        u_perm_rad = self.u_perm_rad[...,np.newaxis]
-        self.c_perm_ax,_ = interp_cntr_to_stagg_tvd(c_perm, self.z_f, self.z_c, bc = (bc_none, bc_neumann_hom), v = u_perm_ax, tvd_limiter = upwind, axis=0)
+        u_perm_ax = self.u_perm_ax[..., np.newaxis]
+        u_perm_rad = self.u_perm_rad[..., np.newaxis]
+        self.c_perm_ax, _ = interp_cntr_to_stagg_tvd(c_perm, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), v=u_perm_ax, tvd_limiter=upwind, axis=0)
         flux_perm_ax = u_perm_ax * self.c_perm_ax
         g_vect[:] = self.div_c_perm_ax @ flux_perm_ax.ravel()
-        self.c_perm_rad,_ = interp_cntr_to_stagg_tvd(c_perm, self.r_f_perm, self.r_c_perm, bc = (bc_neumann_hom, bc_neumann_hom), v = u_perm_rad, tvd_limiter = upwind, axis=1)
+        self.c_perm_rad, _ = interp_cntr_to_stagg_tvd(c_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_perm_rad, tvd_limiter=upwind, axis=1)
         flux_perm_rad = u_perm_rad * self.c_perm_rad
         g_vect[:] += self.div_c_perm_rad @ flux_perm_rad.ravel()
-        
+
         c_ret = c[:, self.num_r_perm:, :]
-        u_ret_ax = self.u_ret_ax[...,np.newaxis]
-        u_ret_rad = self.u_ret_rad[...,np.newaxis]
-        self.c_ret_ax,_ = interp_cntr_to_stagg_tvd(c_ret, self.z_f, self.z_c, bc = bc_ret_ax, v = u_ret_ax, tvd_limiter = upwind, axis=0)
+        u_ret_ax = self.u_ret_ax[..., np.newaxis]
+        u_ret_rad = self.u_ret_rad[..., np.newaxis]
+        self.c_ret_ax, _ = interp_cntr_to_stagg_tvd(c_ret, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, tvd_limiter=upwind, axis=0)
         flux_ret_ax = u_ret_ax * self.c_ret_ax
         g_vect[:] += self.div_c_ret_ax @ flux_ret_ax.ravel()
-        
-        self.c_ret_rad,_ = interp_cntr_to_stagg_tvd(c_ret, self.r_f_ret, self.r_c_ret, bc = (bc_neumann_hom, bc_neumann_hom), v = u_ret_rad, tvd_limiter = upwind, axis=1)
+
+        self.c_ret_rad, _ = interp_cntr_to_stagg_tvd(c_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_ret_rad, tvd_limiter=upwind, axis=1)
         flux_ret_rad = u_ret_rad * self.c_ret_rad
         g_vect[:] += self.div_c_ret_rad @ flux_ret_rad.ravel()        
         
         if compute_jac:
-            conv_matrix_perm_ax, _ = construct_convflux_upwind(c_perm.shape, self.z_f, self.z_c, bc = (bc_none, bc_neumann_hom), v = u_perm_ax, axis=0)
+            conv_matrix_perm_ax, _ = construct_convflux_upwind(c_perm.shape, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), v=u_perm_ax, axis=0)
             jac_perm = self.div_c_perm_ax @ conv_matrix_perm_ax
-            conv_matrix_perm_rad, _ = construct_convflux_upwind(c_perm.shape, self.r_f_perm, self.r_c_perm, bc = (bc_neumann_hom, bc_neumann_hom), v = u_perm_rad, axis=1)
+            conv_matrix_perm_rad, _ = construct_convflux_upwind(c_perm.shape, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_perm_rad, axis=1)
             jac_perm += self.div_c_perm_rad @ conv_matrix_perm_rad
-            conv_matrix_ret_ax, _ = construct_convflux_upwind(c_ret.shape, self.z_f, self.z_c, bc = bc_ret_ax, v = u_ret_ax, axis=0)
+            conv_matrix_ret_ax, _ = construct_convflux_upwind(c_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, axis=0)
             jac_ret = self.div_c_ret_ax @ conv_matrix_ret_ax
-            conv_matrix_ret_rad, _ = construct_convflux_upwind(c_ret.shape, self.r_f_ret, self.r_c_ret, bc = (bc_neumann_hom, bc_neumann_hom), v= u_ret_rad, axis=1)
+            conv_matrix_ret_rad, _ = construct_convflux_upwind(c_ret.shape, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_ret_rad, axis=1)
             jac_ret += self.div_c_ret_rad @ conv_matrix_ret_rad
             jac_perm = update_csc_array_indices(jac_perm, (None, c_perm.shape), (None, c.shape))
             jac_ret = update_csc_array_indices(jac_ret, (None, c_ret.shape), (None, c.shape), offset=(None, (0,self.num_r_perm,0)))
@@ -603,7 +612,7 @@ class MembraneReactor:
         else:
             return g, None
            
-    def construct_g_c_p(self, c_old, T_old, dt, compute_jac=False, kinetics_as_source = False):
+    def _construct_g_c_p(self, c_old, T_old, dt, compute_jac=False, kinetics_as_source = False):
         """
         Construct the residual vector g and the Jacobian matrix for the system.
 
@@ -626,11 +635,11 @@ class MembraneReactor:
         
         c_ret = c[:, self.num_r_perm:, :]
         c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
-        _, p_ret =  self.split_perm_and_ret(p)
+        _, p_ret =  self._split_perm_and_ret(p)
         p_over_c_tot = p_ret[..., np.newaxis]/c_tot_ret
 
-        g_conv, jac_conv = self.construct_g_conv(c, compute_jac=compute_jac)
-        g_diff, jac_diff = self.construct_g_diff(c, compute_jac=compute_jac)
+        g_conv, jac_conv = self._construct_g_conv(c, compute_jac=compute_jac)
+        g_diff, jac_diff = self._construct_g_diff(c, compute_jac=compute_jac)
         if compute_jac:
             jac_cc = jac_conv + jac_diff
             if (c_old is not None):
@@ -643,7 +652,7 @@ class MembraneReactor:
                 jac_cc -= jac_react
             c_tot, dc_tot_dp_mat = self.numjac_p(lambda p: self.correlation.molar_density(y, T, p), p)
             y_mat = construct_coefficient_matrix(y, shape=(c.shape, p.shape+(1,)))
-            jac_darcy = self.construct_jac_darcy()
+            jac_darcy = self._construct_jac_darcy()
             #jac_pp = self.sum_c @ jac_darcy
             #jac_pp += (self.sum_c @ jac_cc @ y_mat) @ dc_tot_dp_mat
             jac_cp = jac_darcy
@@ -678,7 +687,7 @@ class MembraneReactor:
         g[...,-1] = g_p
         return g, self._jac
 
-    def construct_g_T_conv(self, T, compute_jac = False):
+    def _construct_g_T_conv(self, T, compute_jac = False):
         """Assemble convective energy residual (includes -T∇·u term).
 
         Args:
@@ -688,56 +697,57 @@ class MembraneReactor:
         Returns:
             tuple: (g, jac) residual and Jacobian (or None if compute_jac=False)
         """
+        # Build Dirichlet BCs with temperature values
         bc_ret_dirichlet = {'a': 0, 'b': 1, 'd': self.T_ret_in}
-        bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
-        if (self.is_counter_current):
-            bc_ret_ax = (bc_neumann_hom, bc_ret_dirichlet)
-            is_inflow = self.u_ret_ax[0,:] > 0 
-            if (np.any(is_inflow)):
-                b_out = (is_inflow*1.0).reshape((1,-1))
-                a_out = (1.0-b_out)
-                d_out = b_out*self.T_ret_in
-                bc_ret_ax = ({'a':a_out, 'b':b_out, 'd':d_out}, bc_ret_dirichlet)
-        else:
-            bc_ret_ax = (bc_ret_dirichlet, bc_neumann_hom)
-            is_inflow = self.u_ret_ax[-1,:] < 0
-            if (np.any(is_inflow)):
-                b_out = (is_inflow*1.0).reshape((1,-1))
-                a_out = (1.0-b_out)
-                d_out = b_out*self.T_ret_in
-                bc_ret_ax = (bc_ret_dirichlet, {'a':a_out, 'b':b_out, 'd':d_out})
-        
         bc_perm_dirichlet = {'a': 0, 'b': 1, 'd': self.T_perm_in}
-        
+
+        # Determine retentate axial BCs with inflow adjustment for reverse flow
+        if self.is_counter_current:
+            bc_ret_ax = (self.BC_NEUMANN_HOM, bc_ret_dirichlet)
+            is_inflow = self.u_ret_ax[0, :] > 0
+            if np.any(is_inflow):
+                b_out = (is_inflow * 1.0).reshape((1, -1))
+                a_out = 1.0 - b_out
+                d_out = b_out * self.T_ret_in
+                bc_ret_ax = ({'a': a_out, 'b': b_out, 'd': d_out}, bc_ret_dirichlet)
+        else:
+            bc_ret_ax = (bc_ret_dirichlet, self.BC_NEUMANN_HOM)
+            is_inflow = self.u_ret_ax[-1, :] < 0
+            if np.any(is_inflow):
+                b_out = (is_inflow * 1.0).reshape((1, -1))
+                a_out = 1.0 - b_out
+                d_out = b_out * self.T_ret_in
+                bc_ret_ax = (bc_ret_dirichlet, {'a': a_out, 'b': b_out, 'd': d_out})
+
         g = np.empty(T.shape)
         g_vect = g.ravel()
-        
+
         T_perm = T[:, 0:self.num_r_perm]
-        self.T_perm_ax,_ = interp_cntr_to_stagg_tvd(T_perm, self.z_f, self.z_c, bc = (bc_perm_dirichlet, bc_neumann_hom), v = self.u_perm_ax, tvd_limiter = upwind, axis=0)
+        self.T_perm_ax, _ = interp_cntr_to_stagg_tvd(T_perm, self.z_f, self.z_c, bc=(bc_perm_dirichlet, self.BC_NEUMANN_HOM), v=self.u_perm_ax, tvd_limiter=upwind, axis=0)
         flux_perm_ax = self.u_perm_ax * self.T_perm_ax
         g_vect[:] = self.div_p_perm_ax @ flux_perm_ax.ravel()
-        self.T_perm_rad,_ = interp_cntr_to_stagg_tvd(T_perm, self.r_f_perm, self.r_c_perm, bc = (bc_neumann_hom, bc_neumann_hom), v = self.u_perm_rad, tvd_limiter = upwind, axis=1)
+        self.T_perm_rad, _ = interp_cntr_to_stagg_tvd(T_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=self.u_perm_rad, tvd_limiter=upwind, axis=1)
         flux_perm_rad = self.u_perm_rad * self.T_perm_rad
         g_vect[:] += self.div_p_perm_rad @ flux_perm_rad.ravel()
-        
+
         T_ret = T[:, self.num_r_perm:]
-        self.T_ret_ax,_ = interp_cntr_to_stagg_tvd(T_ret, self.z_f, self.z_c, bc = bc_ret_ax, v = self.u_ret_ax, tvd_limiter = upwind, axis=0)
+        self.T_ret_ax, _ = interp_cntr_to_stagg_tvd(T_ret, self.z_f, self.z_c, bc=bc_ret_ax, v=self.u_ret_ax, tvd_limiter=upwind, axis=0)
         flux_ret_ax = self.u_ret_ax * self.T_ret_ax
         g_vect[:] += self.div_p_ret_ax @ flux_ret_ax.ravel()
-        self.T_ret_rad,_ = interp_cntr_to_stagg_tvd(T_ret, self.r_f_ret, self.r_c_ret, bc = (bc_neumann_hom, bc_neumann_hom), v = self.u_ret_rad, tvd_limiter = upwind, axis=1)
+        self.T_ret_rad, _ = interp_cntr_to_stagg_tvd(T_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=self.u_ret_rad, tvd_limiter=upwind, axis=1)
         flux_ret_rad = self.u_ret_rad * self.T_ret_rad
-        g_vect[:] += self.div_p_ret_rad @ flux_ret_rad.ravel()      
-        
-        g_vect[:] -= (T*self.div_u).ravel()
-                
+        g_vect[:] += self.div_p_ret_rad @ flux_ret_rad.ravel()
+
+        g_vect[:] -= (T * self.div_u).ravel()
+
         if compute_jac:
-            conv_matrix_perm_ax, _ = construct_convflux_upwind(T_perm.shape, self.z_f, self.z_c, bc = (bc_perm_dirichlet, bc_neumann_hom), v = self.u_perm_ax, axis=0)
+            conv_matrix_perm_ax, _ = construct_convflux_upwind(T_perm.shape, self.z_f, self.z_c, bc=(bc_perm_dirichlet, self.BC_NEUMANN_HOM), v=self.u_perm_ax, axis=0)
             jac_perm = self.div_p_perm_ax @ conv_matrix_perm_ax
-            conv_matrix_perm_rad, _ = construct_convflux_upwind(T_perm.shape, self.r_f_perm, self.r_c_perm, bc = (bc_neumann_hom, bc_neumann_hom), v = self.u_perm_rad, axis=1)
+            conv_matrix_perm_rad, _ = construct_convflux_upwind(T_perm.shape, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=self.u_perm_rad, axis=1)
             jac_perm += self.div_p_perm_rad @ conv_matrix_perm_rad
-            conv_matrix_ret_ax, _ = construct_convflux_upwind(T_ret.shape, self.z_f, self.z_c, bc = bc_ret_ax, v = self.u_ret_ax, axis=0)
+            conv_matrix_ret_ax, _ = construct_convflux_upwind(T_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=self.u_ret_ax, axis=0)
             jac_ret = self.div_p_ret_ax @ conv_matrix_ret_ax
-            conv_matrix_ret_rad, _ = construct_convflux_upwind(T_ret.shape, self.r_f_ret, self.r_c_ret, bc = (bc_neumann_hom, bc_neumann_hom), v= self.u_ret_rad, axis=1)
+            conv_matrix_ret_rad, _ = construct_convflux_upwind(T_ret.shape, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=self.u_ret_rad, axis=1)
             jac_ret += self.div_p_ret_rad @ conv_matrix_ret_rad
             jac_perm = update_csc_array_indices(jac_perm, (None, T_perm.shape), (None, T.shape))
             jac_ret = update_csc_array_indices(jac_ret, (None, T_ret.shape), (None, T.shape), offset=(None, (0,self.num_r_perm,0)))
@@ -746,7 +756,7 @@ class MembraneReactor:
         else:
             return g, None
         
-    def construct_g_T_cond(self, T):
+    def _construct_g_T_cond(self, T):
         """Assemble conductive + membrane interfacial heat transfer residual.
 
         Returns:
@@ -780,24 +790,23 @@ class MembraneReactor:
         lmbda_ret_rad_mat = construct_coefficient_matrix(lmbda_ret_rad)
         jac_cond += self.div_p_ret_rad @ (-lmbda_ret_rad_mat @ self.grad_T_ret_rad)
 
-        #heat transfer through membrane
-        
-        bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
+        # Heat transfer through membrane - extract interface values
+        bc_rad_hom = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
         T_perm = self.T[:, 0:self.num_r_perm]
-        T_ret  = self.T[:, self.num_r_perm:]
-        _, _ ,T_perm_i, _ = compute_boundary_values(T_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        T_ret_i,_,_,_ = compute_boundary_values(T_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        y_perm = y[:, 0:self.num_r_perm,:]
-        y_ret  = y[:, self.num_r_perm:,:]
-        _, _ ,y_perm_i, _ = compute_boundary_values(y_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        y_ret_i,_,_,_ = compute_boundary_values(y_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        c_perm = c[:, 0:self.num_r_perm,:]
-        c_ret  = c[:, self.num_r_perm:,:]
-        _, _ ,c_perm_i, _ = compute_boundary_values(c_perm, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        c_ret_i,_,_,_ = compute_boundary_values(c_ret, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
-        _, _ ,u_perm_ax_i, _ = compute_boundary_values(self.u_perm_ax, self.r_f_perm, self.r_c_perm, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        T_ret = self.T[:, self.num_r_perm:]
+        _, _, T_perm_i, _ = compute_boundary_values(T_perm, self.r_f_perm, self.r_c_perm, bc=bc_rad_hom, axis=1)
+        T_ret_i, _, _, _ = compute_boundary_values(T_ret, self.r_f_ret, self.r_c_ret, bc=bc_rad_hom, axis=1)
+        y_perm = y[:, 0:self.num_r_perm, :]
+        y_ret = y[:, self.num_r_perm:, :]
+        _, _, y_perm_i, _ = compute_boundary_values(y_perm, self.r_f_perm, self.r_c_perm, bc=bc_rad_hom, axis=1)
+        y_ret_i, _, _, _ = compute_boundary_values(y_ret, self.r_f_ret, self.r_c_ret, bc=bc_rad_hom, axis=1)
+        c_perm = c[:, 0:self.num_r_perm, :]
+        c_ret = c[:, self.num_r_perm:, :]
+        _, _, c_perm_i, _ = compute_boundary_values(c_perm, self.r_f_perm, self.r_c_perm, bc=bc_rad_hom, axis=1)
+        c_ret_i, _, _, _ = compute_boundary_values(c_ret, self.r_f_ret, self.r_c_ret, bc=bc_rad_hom, axis=1)
+        _, _, u_perm_ax_i, _ = compute_boundary_values(self.u_perm_ax, self.r_f_perm, self.r_c_perm, bc=bc_rad_hom, axis=1)
         u_perm_i = interp_stagg_to_cntr(u_perm_ax_i, self.z_f, self.z_c, axis=0)
-        u_ret_ax_i,_,_,_ = compute_boundary_values(self.u_ret_ax, self.r_f_ret, self.r_c_ret, bc=(bc_neumann_hom, bc_neumann_hom), axis=1)
+        u_ret_ax_i, _, _, _ = compute_boundary_values(self.u_ret_ax, self.r_f_ret, self.r_c_ret, bc=bc_rad_hom, axis=1)
         u_ret_i = interp_stagg_to_cntr(u_ret_ax_i, self.z_f, self.z_c, axis=0)
 
 
@@ -841,11 +850,11 @@ class MembraneReactor:
 
         return g, jac_cond, cp_inv_mat
 
-    def construct_g_T(self, T_old, dt, compute_jac=False):
+    def _construct_g_T(self, T_old, dt, compute_jac=False):
         """Combine accumulation, convection, conduction for temperature residual.""" 
         T = self.T
-        g_conv, jac_conv = self.construct_g_T_conv(T, compute_jac=compute_jac)
-        g_cond, jac_cond, cp_inv_mat = self.construct_g_T_cond(T)
+        g_conv, jac_conv = self._construct_g_T_conv(T, compute_jac=compute_jac)
+        g_cond, jac_cond, cp_inv_mat = self._construct_g_T_cond(T)
         g =  g_conv + g_cond
         if T_old is not None:
             g += (self.jac_T_accum @ ((T-T_old).reshape((-1, 1))/dt)).reshape(T.shape)
@@ -854,7 +863,7 @@ class MembraneReactor:
             self._jac_T = (1.0/dt)*self.jac_T_accum + jac_conv + jac_cond
         return g, self._jac_T, cp_inv_mat
     
-    def solve_T(self, T_old, dt):
+    def _solve_T(self, T_old, dt):
         """Solve energy equation (if non-isothermal) including reaction heat.
 
         Returns:
@@ -868,7 +877,7 @@ class MembraneReactor:
         c_ret = c[:, self.num_r_perm:,:]
         p_ret = p[:, self.num_r_perm:]
         T_ret = T[:,self.num_r_perm:]        
-        g_T, jac_T, cp_inv_mat = self.construct_g_T(T_old, dt, compute_jac=True)
+        g_T, jac_T, cp_inv_mat = self._construct_g_T(T_old, dt, compute_jac=True)
         g_T_ret = g_T[:,self.num_r_perm:]
         p_partial = p[:,self.num_r_perm:,np.newaxis]*c_ret/np.sum(c_ret, axis=-1, keepdims=True)
         rates =  self.factor_react*self.kinetics(p_partial)
@@ -876,15 +885,15 @@ class MembraneReactor:
         dH_react = np.sum(rates * enthalpies, axis=-1)
         g_T_ret[...] += dH_react*cp_inv_mat.data.reshape(T.shape)[:,self.num_r_perm:]
         dT = -sla.spsolve(jac_T, g_T.reshape((-1,1)))
-        self.cnt_T += 1
+        self.cnt_num_solves_T += 1
         
-        success = (np.linalg.norm(dT, ord=np.inf) < 500) and (np.all(T_vec+dT)>0.0)
+        success = (np.linalg.norm(dT, ord=np.inf) < MAX_DT_PER_STEP) and (np.all(T_vec+dT)>0.0)
         if success:
             T_vec[...] += dT
         self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:])
         return success
 
-    def solve_c_p(self, c_old, T_old, dt, verbose = 0):
+    def _solve_c_p(self, c_old, T_old, dt, verbose = 0):
         """Newton/line-search solve for species concentrations.
 
         Returns:
@@ -900,32 +909,32 @@ class MembraneReactor:
         factor_norm_p = self.factor_norm_p
         c_p_vec = c_p.ravel()
         for k in range(self.num_concentration_iterations):
-            self.construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])
-            g, jac= self.construct_g_c_p(c_old, T_old, dt, compute_jac=True)
+            self._construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])
+            g, jac= self._construct_g_c_p(c_old, T_old, dt, compute_jac=True)
             g_norm = np.linalg.norm(g[...,:-1].ravel(), ord=ord) * factor_norm_c
             g_p_norm = np.linalg.norm(g[...,-1].ravel(), ord=ord) * factor_norm_p
             if k==0:
                 g_norm_init = g_norm
                 g_p_norm_init = g_p_norm
             dc_p = -sla.spsolve(jac, g.reshape((-1,1)))
-            self.cnt_c_p += 1
+            self.cnt_num_solves_c_p += 1
             c_p_prev = c_p_vec.copy()
             g_norm_prev = g_norm
             g_p_norm_prev = g_p_norm
             alpha = 1.0
             while True:
                 c_p_vec[...] = c_p_prev + alpha*dc_p
-                #self.construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])          
-                self.update_velocity_fields(p=c_p[...,-1])
+                #self._construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])          
+                self._update_velocity_fields(p=c_p[...,-1])
                 compute_jac = (k < self.num_concentration_iterations - 1)
-                g, _ = self.construct_g_c_p(c_old, T_old, dt, compute_jac=False)
+                g, _ = self._construct_g_c_p(c_old, T_old, dt, compute_jac=False)
                 g_norm = np.linalg.norm(g[...,:-1].ravel(), ord=ord) * factor_norm_c
                 g_p_norm = np.linalg.norm(g[...,-1].ravel(), ord=ord)* factor_norm_p
                 break
-                if (g_norm < (1.0-1e-4*alpha)*g_norm_prev and g_p_norm < (1.0-1e-4*alpha)*g_p_norm_prev) or (not success):
+                if (g_norm < (1.0-ARMIJO_COEFF*alpha)*g_norm_prev and g_p_norm < (1.0-ARMIJO_COEFF*alpha)*g_p_norm_prev) or (not success):
                     break
                 alpha *= 0.5
-                if (alpha < 1e-3):
+                if (alpha < MIN_LINE_SEARCH_ALPHA):
                     alpha = 0.0
                     success = False
                     if verbose > 0:
@@ -935,14 +944,21 @@ class MembraneReactor:
                 break
         return g_norm, g_norm_init, g_p_norm, g_p_norm_init,success 
 
-    def compute_dt_chem_min(self):
+    def _compute_dt_cfl(self, cfl = CFL_INIT):
+        """Return minimum time step avoiding CFL condition violation."""
+        dz_cell = np.min(self.z_f[1:] - self.z_f[:-1])
+        u_max = np.maximum(np.max(np.abs(self.u_perm_ax)), np.max(np.abs(self.u_ret_ax)))
+        dt_cfl = cfl * dz_cell / u_max
+        return dt_cfl
+        
+    def _compute_dt_chem_min(self):
         """Return minimum explicit chemical time step avoiding negative c."""
         c_ret = self.c_p[:, self.num_r_perm:, :-1]
         c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
-        _, p_ret =  self.split_perm_and_ret(self.c_p[...,-1])
+        _, p_ret =  self._split_perm_and_ret(self.c_p[...,-1])
         p_over_c_tot = p_ret[..., np.newaxis]/c_tot_ret
         rates = self.kinetics(c_ret*p_over_c_tot)
-        eps = 1e-8
+        eps = EPS_CHEM_TIMESTEP
         dt_chem_local = np.where(rates < 0,
                                     np.maximum(c_ret, eps) / (-rates + eps),
                                     np.inf)
@@ -960,7 +976,7 @@ class MembraneReactor:
         """
         for j in range(self.num_newton_iterations):
             # --- Segregated Solves ---
-            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = self.solve_c_p(c_old, T_old, dt)
+            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = self._solve_c_p(c_old, T_old, dt)
             self.kinetics.set_T_and_p(p=self.c_p[:,self.num_r_perm:,-1])
             print(f"j: {j}, g_norm: {g_norm}")
             if j == 0:
@@ -969,7 +985,7 @@ class MembraneReactor:
 
             success_T = True
             if not self.is_isothermal:
-                success_T = self.solve_T(T_old, dt)
+                success_T = self._solve_T(T_old, dt)
                 self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:])
                 
             if (g_norm > 10*g_norm_init or g_p_norm > 10*g_p_norm_init):
@@ -995,14 +1011,14 @@ class MembraneReactor:
         if dt is None:
             dt = self.dt
 
-        self.cnt_c_p, self.cnt_T = 0, 0
+        self.cnt_num_solves_c_p, self.cnt_num_solves_T = 0, 0
         for i in range(num_timesteps):
             T_old = self.T.copy()
             c_old = self.c_p[...,:-1].copy()
-            is_converged = self.solve_adaptive_dt(dt, c_old, T_old, **kwargs)
+            is_converged = self._solve_adaptive_dt(dt, c_old, T_old, **kwargs)
         return is_converged
 
-    def solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose = 0):
+    def _solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose = 0):
         """
         Solves the steady-state problem using an adaptive predictor-corrector
         continuation method on the reaction rate scaling factor. This is the
@@ -1046,14 +1062,14 @@ class MembraneReactor:
                     self.c_p = c_p_prev.copy()
                     self.T = T_prev.copy()
                 self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:], p=self.c_p[:,self.num_r_perm:,-1])
-                self.construct_darcy_matrices()
-                self.update_velocity_fields(p=self.c_p[...,-1])
+                self._construct_darcy_matrices()
+                self._update_velocity_fields(p=self.c_p[...,-1])
             elif not is_first_step:
                 # Use a zero-order predictor (the last solution) for the first step
                 self.c_p, self.T = c_p_prev.copy(), T_prev.copy()
                 self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:], p=self.c_p[:,self.num_r_perm:,-1])
-                self.construct_darcy_matrices()
-                self.update_velocity_fields(p=self.c_p[...,-1])
+                self._construct_darcy_matrices()
+                self._update_velocity_fields(p=self.c_p[...,-1])
 
             # --- Corrector Step ---
             if verbose > 1:
@@ -1103,24 +1119,26 @@ class MembraneReactor:
                 warnings.warn(f"Continuation failed: final factor_react = {self.factor_react}", RuntimeWarning)
         return is_converged
 
-    def solve_adaptive_dt(self, dt, c_old, T_old, dt_init=None, dt_min=None, dt_max=None, dt_factor_increase=1.2, dt_factor_decrease=0.5, verbose = 0):
+    def _solve_adaptive_dt(self, dt, c_old, T_old, dt_init=None, dt_min=None, dt_max=None, dt_factor_increase=1.2, dt_factor_decrease=0.5, verbose = 0):
         """
         Solves the steady-state problem using an adaptive predictor-corrector
         continuation method on the reaction rate scaling factor. This is the
         recommended robust solver for difficult non-linear problems.
         """
         # --- Initialization ---
-        dt_chem = self.compute_dt_chem_min()
+        dt_chem = None
         if (dt_init is None):
+            dt_chem = self._compute_dt_chem_min()
             dt_init = min(dt_chem, dt)
         if (dt_min is None):
+            if (dt_chem is None):
+                dt_chem = self._compute_dt_chem_min()
             dt_min = min(0.2*dt_chem, dt_init, dt)
         if (dt_max is None):
             dt_max = max(dt_init, dt)
         t_final = dt
         dt = dt_init
         conv_factor_min = self.conv_factor_min
-        
         
         
         # History for predictor step (current, previous)
@@ -1149,15 +1167,15 @@ class MembraneReactor:
                     self.c_p, self.T = c_p_prev.copy(), T_prev.copy()
                     dt = max(dt*dt_factor_decrease, dt_min)
                     self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:], p=self.c_p[:,self.num_r_perm:,-1])
-                    self.construct_darcy_matrices()
-                    self.update_velocity_fields(p=self.c_p[...,-1])
+                    self._construct_darcy_matrices()
+                    self._update_velocity_fields(p=self.c_p[...,-1])
                     if verbose > 1:
                         print(f"Reduced dt to {dt:.4f}.")
         if (verbose > 1 and not is_converged):
             print(f"FAILED: Could not converge at dt = {t}")
         return is_converged
     
-    def compute_fluxes_diff(self, c = None, T = None, p = None):
+    def _compute_fluxes_diff(self, c = None, T = None, p = None):
         """Compute diffusive + permeation species fluxes (axis & radial)."""
         shape_c_ret = (self.num_z, self.num_r_ret, self.num_c)
         shape_c_perm = (self.num_z, self.num_r_perm, self.num_c)
@@ -1167,9 +1185,9 @@ class MembraneReactor:
             T = self.T
         if p is None:
             p = self.c_p[...,-1]
-        c_perm, c_ret = self.split_perm_and_ret(c)
-        T_perm, T_ret = self.split_perm_and_ret(T)
-        p_perm, p_ret = self.split_perm_and_ret(p)
+        c_perm, c_ret = self._split_perm_and_ret(c)
+        T_perm, T_ret = self._split_perm_and_ret(T)
+        p_perm, p_ret = self._split_perm_and_ret(p)
         c_vect = c.reshape((-1,1))
         
         y_ret = c_ret/np.sum(c_ret, axis=-1, keepdims=True)  # Mole fractions
@@ -1209,31 +1227,30 @@ class MembraneReactor:
 
         return fluxes_ret_ax, fluxes_ret_rad, fluxes_perm_ax, fluxes_perm_rad
     
-    def compute_fluxes_conv(self, c=None, compute_jac = False):
+    def _compute_fluxes_conv(self, c=None, compute_jac=False):
         """Compute convective species fluxes using upwind TVD reconstructions."""
         if c is None:
-            c = self.c_p[...,:-1]
-        bc_neumann_hom = {'a': 1, 'b': 0, 'd': 0}
-        bc_none = {'a': 0, 'b': 0, 'd': 0}
-        if (self.is_counter_current):
-            bc_ret_ax = (bc_neumann_hom, bc_none)
+            c = self.c_p[..., :-1]
+
+        if self.is_counter_current:
+            bc_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
         else:
-            bc_ret_ax = (bc_none, bc_neumann_hom)
-        
+            bc_ret_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
+
         c_perm = c[:, 0:self.num_r_perm, :]
-        u_perm_ax = self.u_perm_ax[...,np.newaxis]
-        u_perm_rad = self.u_perm_rad[...,np.newaxis]
-        c_perm_ax,_ = interp_cntr_to_stagg_tvd(c_perm, self.z_f, self.z_c, bc = (bc_none, bc_neumann_hom), v = u_perm_ax, tvd_limiter = upwind, axis=0)
+        u_perm_ax = self.u_perm_ax[..., np.newaxis]
+        u_perm_rad = self.u_perm_rad[..., np.newaxis]
+        c_perm_ax, _ = interp_cntr_to_stagg_tvd(c_perm, self.z_f, self.z_c, bc=(self.BC_NONE, self.BC_NEUMANN_HOM), v=u_perm_ax, tvd_limiter=upwind, axis=0)
         fluxes_perm_ax = u_perm_ax * c_perm_ax
-        c_perm_rad,_ = interp_cntr_to_stagg_tvd(c_perm, self.r_f_perm, self.r_c_perm, bc = (bc_neumann_hom, bc_neumann_hom), v = u_perm_rad, tvd_limiter = upwind, axis=1)
+        c_perm_rad, _ = interp_cntr_to_stagg_tvd(c_perm, self.r_f_perm, self.r_c_perm, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_perm_rad, tvd_limiter=upwind, axis=1)
         fluxes_perm_rad = u_perm_rad * c_perm_rad
-        
+
         c_ret = c[:, self.num_r_perm:, :]
-        u_ret_ax = self.u_ret_ax[...,np.newaxis]
-        u_ret_rad = self.u_ret_rad[...,np.newaxis]
-        c_ret_ax,_ = interp_cntr_to_stagg_tvd(c_ret, self.z_f, self.z_c, bc = bc_ret_ax, v = u_ret_ax, tvd_limiter = upwind, axis=0)
+        u_ret_ax = self.u_ret_ax[..., np.newaxis]
+        u_ret_rad = self.u_ret_rad[..., np.newaxis]
+        c_ret_ax, _ = interp_cntr_to_stagg_tvd(c_ret, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, tvd_limiter=upwind, axis=0)
         fluxes_ret_ax = u_ret_ax * c_ret_ax
-        c_ret_rad,_ = interp_cntr_to_stagg_tvd(c_ret, self.r_f_ret, self.r_c_ret, bc = (bc_neumann_hom, bc_neumann_hom), v = u_ret_rad, tvd_limiter = upwind, axis=1)
+        c_ret_rad, _ = interp_cntr_to_stagg_tvd(c_ret, self.r_f_ret, self.r_c_ret, bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM), v=u_ret_rad, tvd_limiter=upwind, axis=1)
         fluxes_ret_rad = u_ret_rad * c_ret_rad
         
         fluxes_perm_ax[0,:,:] = self.flux_perm_in[0,:,:]
@@ -1246,8 +1263,8 @@ class MembraneReactor:
  
     def compute_flows(self):
         """Integrate fluxes to obtain net axial inlet/outlet & membrane transfer."""
-        fluxes_ret_ax, fluxes_ret_rad, fluxes_perm_ax, fluxes_perm_rad = self.compute_fluxes_diff()
-        fluxes_conv_ret_ax,  fluxes_conv_ret_rad, fluxes_conv_perm_ax, fluxes_conv_perm_rad  = self.compute_fluxes_conv()
+        fluxes_ret_ax, fluxes_ret_rad, fluxes_perm_ax, fluxes_perm_rad = self._compute_fluxes_diff()
+        fluxes_conv_ret_ax,  fluxes_conv_ret_rad, fluxes_conv_perm_ax, fluxes_conv_perm_rad  = self._compute_fluxes_conv()
         fluxes_ret_ax += fluxes_conv_ret_ax
         fluxes_ret_rad += fluxes_conv_ret_rad
         fluxes_perm_ax += fluxes_conv_perm_ax
