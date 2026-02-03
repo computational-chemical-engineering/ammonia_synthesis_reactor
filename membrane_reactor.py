@@ -13,6 +13,10 @@ from gas_mixture_correlations import GasMixtureCorrelations
 from ammonia_synthesis_kinetics import AmmoniaSynthesisKinetics
 from config import ReactorConfig
 from mesh import ReactorMesh
+from physics import (
+    BC_NONE, BC_DIRICHLET, BC_DIRICHLET_HOM, BC_NEUMANN, BC_NEUMANN_HOM,
+    make_dirichlet_bc,
+)
 import defaults  # Import the defaults module (still needed for reload)
 
 # =============================================================================
@@ -69,14 +73,14 @@ class MembraneReactor:
     """
 
     # =========================================================================
-    # Standard boundary condition templates
+    # Standard boundary condition templates (imported from physics.py)
     # =========================================================================
-    # These dictionaries define the coefficients for Robin-type BCs: a*grad(u) + b*u = d
-    BC_NONE = {'a': 0, 'b': 0, 'd': 0}           # No boundary (internal face)
-    BC_DIRICHLET_HOM = {'a': 0, 'b': 1, 'd': 0}  # Homogeneous Dirichlet: u = 0
-    BC_NEUMANN_HOM = {'a': 1, 'b': 0, 'd': 0}    # Homogeneous Neumann: grad(u) = 0
-    BC_DIRICHLET = {'a': 0, 'b': 1, 'd': 1}      # Dirichlet with placeholder value
-    BC_NEUMANN = {'a': 1, 'b': 0, 'd': 1}        # Neumann with placeholder value
+    # Kept as class attributes for backward compatibility
+    BC_NONE = BC_NONE
+    BC_DIRICHLET_HOM = BC_DIRICHLET_HOM
+    BC_NEUMANN_HOM = BC_NEUMANN_HOM
+    BC_DIRICHLET = BC_DIRICHLET
+    BC_NEUMANN = BC_NEUMANN
 
     def __init__(self, config_file=None, c=None, p=None, T=None, **kwargs):
         """Construct reactor, load defaults, apply overrides, allocate fields.
