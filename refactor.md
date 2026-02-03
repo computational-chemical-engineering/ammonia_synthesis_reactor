@@ -65,23 +65,25 @@ config_file = 'debug.json'
 - Remove side effects: Do not modify `self.c_p` or `self.T` during assembly.
 - Matrix assembly: Consolidate `update_csr_array_indices` using a descriptive mapping from local (retentate/permeate) to global (monolithic) matrices.
 
-**Completed (commit `c660f5e`)**:
-- Created `physics.py` with BC definitions and helper functions
-- Moved BC_NONE, BC_DIRICHLET, BC_NEUMANN, etc. to physics.py
-- Added `make_dirichlet_bc()`, `make_neumann_bc()` helpers
-- Created stateless residual templates:
-  - `assemble_convection_residual()` - single-region convection
-  - `assemble_diffusion_residual()` - single-region diffusion
-  - `assemble_temperature_convection()` - single-region T convection
-- Updated membrane_reactor.py to import BCs from physics.py
+**Completed**:
+- `c660f5e`: Created `physics.py` with BC definitions and stateless residual templates
+  - BC_NONE, BC_DIRICHLET, BC_NEUMANN, etc.
+  - `make_dirichlet_bc()`, `make_neumann_bc()` helpers
+  - `assemble_convection_residual()`, `assemble_diffusion_residual()`, `assemble_temperature_convection()`
+- `f4c9bf6`: Added `get_axial_bcs_for_flow()` helper and refactored BC logic
+  - Handles co-current vs counter-current flow direction
+  - Handles reverse flow at outlets (scalar and array inflow values)
+  - Refactored `_construct_g_conv()` and `_construct_g_T_conv()` to use it
+
+**Note**: The stateless `assemble_*_residual()` functions cannot be directly wired in
+because the divergence operators output to monolithic arrays. A full extraction would
+require restructuring the operator setup in `_init_jac()`.
 
 **Remaining work**:
-1. Wire `assemble_convection_residual()` into `_construct_g_conv()`
-2. Wire `assemble_diffusion_residual()` into `_construct_g_diff()`
-3. Extract membrane permeation logic from `_construct_g_diff()`
-4. Extract `_construct_g_c_p()` reaction source assembly
-5. Wire temperature functions into `_construct_g_T_*()` methods
-6. Create `FlowEngine` class for Darcy/Ergun (inside physics.py)
+1. Extract membrane permeation logic from `_construct_g_diff()` to physics.py
+2. Extract reaction source computation to physics.py
+3. Create `FlowEngine` class for Darcy/Ergun (inside physics.py)
+4. (Optional) Restructure operators to enable full physics function integration
 
 ### Phase 3: Solver Abstraction ⏳ PENDING
 - Generalize Newton solver: Extract logic from `_solve_c_p` into a standalone `NewtonSolver`.
@@ -155,7 +157,7 @@ Each phase introduces new modules while the old class continues to pass regressi
 	```
 
 ## Technical Constraints
-- Libraries: Maintain compatibility with `scipy.sparse` (using `csr_array`, not `csc_matrix`), `numpy`, and the custom `pymrm` library.
+- Libraries: Maintain compatibility with `scipy.sparse` (using `csc_array`, not `csc_matrix`), `numpy`, and the custom `pymrm` library.
 - Vectorization: Ensure residual calculations remain fully vectorized for performance.
 - Non-isothermal logic: Keep segregated solve (Concentration–Pressure vs. Temperature) as an option; allow fully coupled assembly in the future.
 - State immutability: Treat `State` objects as immutable; solvers return new states rather than mutating in place.
@@ -164,7 +166,7 @@ Each phase introduces new modules while the old class continues to pass regressi
 
 **Last updated**: 2026-02-03
 **Branch**: `feat/monolithic`
-**Latest commit**: `c660f5e` (Phase 2 partial)
+**Latest commit**: `f4c9bf6` (Phase 2 - BC helper)
 
 | Phase | Status | Commit |
 |-------|--------|--------|
