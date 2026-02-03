@@ -59,11 +59,29 @@ config_file = 'debug.json'
 
 **Regression test**: PASSED (L2 rel error = 0.00e+00)
 
-### Phase 2: Physics Decoupling ⏳ PENDING
+### Phase 2: Physics Decoupling 🔄 IN PROGRESS
 - Stateless residuals: Refactor `_construct_g_conv`, `_construct_g_diff`, and `_construct_g_T` into a `PhysicsEngine`.
 - Pure I/O: Methods take the current state $(c, p, T)$ and return the residual/Jacobian.
 - Remove side effects: Do not modify `self.c_p` or `self.T` during assembly.
 - Matrix assembly: Consolidate `update_csr_array_indices` using a descriptive mapping from local (retentate/permeate) to global (monolithic) matrices.
+
+**Completed (commit `c660f5e`)**:
+- Created `physics.py` with BC definitions and helper functions
+- Moved BC_NONE, BC_DIRICHLET, BC_NEUMANN, etc. to physics.py
+- Added `make_dirichlet_bc()`, `make_neumann_bc()` helpers
+- Created stateless residual templates:
+  - `assemble_convection_residual()` - single-region convection
+  - `assemble_diffusion_residual()` - single-region diffusion
+  - `assemble_temperature_convection()` - single-region T convection
+- Updated membrane_reactor.py to import BCs from physics.py
+
+**Remaining work**:
+1. Wire `assemble_convection_residual()` into `_construct_g_conv()`
+2. Wire `assemble_diffusion_residual()` into `_construct_g_diff()`
+3. Extract membrane permeation logic from `_construct_g_diff()`
+4. Extract `_construct_g_c_p()` reaction source assembly
+5. Wire temperature functions into `_construct_g_T_*()` methods
+6. Create `FlowEngine` class for Darcy/Ergun (inside physics.py)
 
 ### Phase 3: Solver Abstraction ⏳ PENDING
 - Generalize Newton solver: Extract logic from `_solve_c_p` into a standalone `NewtonSolver`.
@@ -146,23 +164,27 @@ Each phase introduces new modules while the old class continues to pass regressi
 
 **Last updated**: 2026-02-03
 **Branch**: `feat/monolithic`
-**Latest commit**: `2261218` (Phase 1 complete)
+**Latest commit**: `c660f5e` (Phase 2 partial)
 
 | Phase | Status | Commit |
 |-------|--------|--------|
 | Phase 0: Regression Test | ✅ Complete | `d9e1027` |
 | Phase 1: Config & Mesh | ✅ Complete | `2261218` |
-| Phase 2: Physics Decoupling | ⏳ Pending | — |
+| Phase 2: Physics Decoupling | 🔄 In Progress | `c660f5e` |
 | Phase 3: Solver Abstraction | ⏳ Pending | — |
 | Phase 4: Modernization | ⏳ Pending | — |
 
 ## Next Steps
-1. **Phase 2**: Create `physics.py` with stateless residual/Jacobian assembly
-   - Start by extracting `_construct_g_conv`, `_construct_g_diff` methods
-   - Create `PhysicsEngine` class or module of pure functions
-   - Key methods in `membrane_reactor.py` to refactor:
-     - `_construct_g_c_p()` (~100 lines)
-     - `_construct_g_T()` (~80 lines)
-     - `_construct_darcy_matrices()` (~60 lines)
+1. **Continue Phase 2**: Wire physics.py functions into membrane_reactor.py
+   - Methods to migrate (in order of complexity):
+     - `_construct_g_conv()` → use `assemble_convection_residual()` for perm/ret
+     - `_construct_g_diff()` → use `assemble_diffusion_residual()` + membrane flux
+     - `_construct_g_T_conv()` → use `assemble_temperature_convection()`
+     - `_construct_g_T_cond()` → extract thermal conductivity assembly
+     - `_construct_g_c_p()` → combines conv + diff + reaction
+   - Key challenge: Methods depend on operators cached in `_init_jac()`
+   - Strategy: Pass operators explicitly to physics functions
+
 2. Run regression test after each change: `.venv/bin/python regression_test.py --test`
-3. Commit incrementally within each phase
+
+3. Once Phase 2 complete, proceed to Phase 3 (solver extraction)
