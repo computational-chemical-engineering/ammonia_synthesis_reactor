@@ -9,7 +9,7 @@ operator objects rather than relying on class attributes.
 from typing import Tuple, Optional, Dict, Any
 import numpy as np
 from numpy.typing import NDArray
-from scipy.sparse import csr_array
+from scipy.sparse import csc_array
 
 from pymrm import (
     construct_coefficient_matrix,
@@ -106,8 +106,8 @@ def assemble_convection_residual(
     c: NDArray,
     u_ax: NDArray,
     u_rad: NDArray,
-    div_ax: csr_array,
-    div_rad: csr_array,
+    div_ax: csc_array,
+    div_rad: csc_array,
     z_f: NDArray,
     z_c: NDArray,
     r_f: NDArray,
@@ -115,7 +115,7 @@ def assemble_convection_residual(
     bc_ax: Tuple[Dict, Dict],
     bc_rad: Tuple[Dict, Dict] = (BC_NEUMANN_HOM, BC_NEUMANN_HOM),
     compute_jac: bool = False,
-) -> Tuple[NDArray, Optional[csr_array]]:
+) -> Tuple[NDArray, Optional[csc_array]]:
     """Assemble convective transport residual for a single region.
 
     Args:
@@ -174,17 +174,17 @@ def assemble_diffusion_residual(
     T: NDArray,
     p: NDArray,
     correlation,  # GasMixtureCorrelations
-    div_ax: csr_array,
-    div_rad: csr_array,
-    grad_ax: csr_array,
-    grad_rad: csr_array,
+    div_ax: csc_array,
+    div_rad: csc_array,
+    grad_ax: csc_array,
+    grad_rad: csc_array,
     grad_bc_ax: NDArray,
     z_f: NDArray,
     z_c: NDArray,
     r_f: NDArray,
     r_c: NDArray,
     compute_jac: bool = False,
-) -> Tuple[NDArray, Optional[csr_array], NDArray]:
+) -> Tuple[NDArray, Optional[csc_array], NDArray]:
     """Assemble diffusive transport residual for a single region.
 
     Args:
@@ -236,8 +236,8 @@ def assemble_temperature_convection(
     u_ax: NDArray,
     u_rad: NDArray,
     div_u: NDArray,
-    div_ax: csr_array,
-    div_rad: csr_array,
+    div_ax: csc_array,
+    div_rad: csc_array,
     z_f: NDArray,
     z_c: NDArray,
     r_f: NDArray,
@@ -245,7 +245,7 @@ def assemble_temperature_convection(
     bc_ax: Tuple[Dict, Dict],
     bc_rad: Tuple[Dict, Dict] = (BC_NEUMANN_HOM, BC_NEUMANN_HOM),
     compute_jac: bool = False,
-) -> Tuple[NDArray, Optional[csr_array]]:
+) -> Tuple[NDArray, Optional[csc_array]]:
     """Assemble convective energy residual including -T*div(u) term.
 
     Args:

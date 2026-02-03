@@ -63,7 +63,7 @@ config_file = 'debug.json'
 - Stateless residuals: Refactor `_construct_g_conv`, `_construct_g_diff`, and `_construct_g_T` into a `PhysicsEngine`.
 - Pure I/O: Methods take the current state $(c, p, T)$ and return the residual/Jacobian.
 - Remove side effects: Do not modify `self.c_p` or `self.T` during assembly.
-- Matrix assembly: Consolidate `update_csr_array_indices` using a descriptive mapping from local (retentate/permeate) to global (monolithic) matrices.
+- Matrix assembly: Consolidate `update_csc_array_indices` using a descriptive mapping from local (retentate/permeate) to global (monolithic) matrices.
 
 **Completed**:
 - `c660f5e`: Created `physics.py` with BC definitions and stateless residual templates
@@ -101,7 +101,7 @@ Define contracts between modules before implementation to prevent late-stage mis
 ```python
 from dataclasses import dataclass
 from numpy.typing import NDArray
-from scipy.sparse import csr_array
+from scipy.sparse import csc_array
 
 @dataclass(frozen=True)
 class State:
@@ -113,12 +113,12 @@ class State:
 
 # physics.py
 def assemble_residual(state: State, mesh: ReactorMesh, config: ReactorConfig) -> NDArray[np.float64]: ...
-def assemble_jacobian(state: State, mesh: ReactorMesh, config: ReactorConfig) -> csr_array: ...
+def assemble_jacobian(state: State, mesh: ReactorMesh, config: ReactorConfig) -> csc_array: ...
 
 # solvers.py
 def newton_solve(
     residual_fn: Callable[[NDArray], NDArray],
-    jacobian_fn: Callable[[NDArray], csr_array],
+    jacobian_fn: Callable[[NDArray], csc_array],
     x0: NDArray,
     tol: float = 1e-8,
     max_iter: int = 50
