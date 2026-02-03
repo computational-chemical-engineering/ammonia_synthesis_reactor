@@ -74,6 +74,12 @@ config_file = 'debug.json'
   - Handles co-current vs counter-current flow direction
   - Handles reverse flow at outlets (scalar and array inflow values)
   - Refactored `_construct_g_conv()` and `_construct_g_T_conv()` to use it
+- `0562b0b`: Extracted permeability calculations to physics.py
+  - `compute_permeate_permeability()` for Hagen-Poiseuille (permeate side)
+  - `compute_packed_bed_permeability()` for Ergun equation (packed bed)
+  - Documented ERGUN and permeability constants
+  - Refactored `_construct_darcy_matrices()` to use new functions
+- `84e27f0`: Cleanup - consolidated all physics constants in physics.py
 
 **Note**: The stateless `assemble_*_residual()` functions cannot be directly wired in
 because the divergence operators output to monolithic arrays. A full extraction would
@@ -81,9 +87,8 @@ require restructuring the operator setup in `_init_jac()`.
 
 **Remaining work**:
 1. Extract membrane permeation logic from `_construct_g_diff()` to physics.py
-2. Extract reaction source computation to physics.py
-3. Create `FlowEngine` class for Darcy/Ergun (inside physics.py)
-4. (Optional) Restructure operators to enable full physics function integration
+2. Extract reaction source computation to physics.py (already in separate AmmoniaSynthesisKinetics class)
+3. (Optional) Restructure operators to enable full physics function integration
 
 ### Phase 3: Solver Abstraction ⏳ PENDING
 - Generalize Newton solver: Extract logic from `_solve_c_p` into a standalone `NewtonSolver`.
@@ -166,27 +171,26 @@ Each phase introduces new modules while the old class continues to pass regressi
 
 **Last updated**: 2026-02-03
 **Branch**: `feat/monolithic`
-**Latest commit**: `f4c9bf6` (Phase 2 - BC helper)
+**Latest commit**: `84e27f0` (Phase 2 - constants cleanup)
 
 | Phase | Status | Commit |
 |-------|--------|--------|
 | Phase 0: Regression Test | ✅ Complete | `d9e1027` |
 | Phase 1: Config & Mesh | ✅ Complete | `2261218` |
-| Phase 2: Physics Decoupling | 🔄 In Progress | `c660f5e` |
+| Phase 2: Physics Decoupling | 🔄 In Progress | `84e27f0` |
 | Phase 3: Solver Abstraction | ⏳ Pending | — |
 | Phase 4: Modernization | ⏳ Pending | — |
 
 ## Next Steps
-1. **Continue Phase 2**: Wire physics.py functions into membrane_reactor.py
-   - Methods to migrate (in order of complexity):
-     - `_construct_g_conv()` → use `assemble_convection_residual()` for perm/ret
-     - `_construct_g_diff()` → use `assemble_diffusion_residual()` + membrane flux
-     - `_construct_g_T_conv()` → use `assemble_temperature_convection()`
-     - `_construct_g_T_cond()` → extract thermal conductivity assembly
-     - `_construct_g_c_p()` → combines conv + diff + reaction
-   - Key challenge: Methods depend on operators cached in `_init_jac()`
-   - Strategy: Pass operators explicitly to physics functions
+1. **Continue Phase 2**: Extract remaining physics to physics.py
+   - Membrane permeation flux calculation from `_construct_g_diff()`
+   - (Note: Full residual assembly extraction blocked by monolithic operator design)
 
-2. Run regression test after each change: `.venv/bin/python regression_test.py --test`
+2. **Prepare for Phase 3**: Identify solver-specific code in membrane_reactor.py
+   - Newton iteration in `_solve_c_p()` and `_solve_T()`
+   - Armijo line search logic
+   - Continuation strategies (`_solve_adaptive_react`, `_solve_adaptive_dt`)
 
-3. Once Phase 2 complete, proceed to Phase 3 (solver extraction)
+3. Run regression test after each change: `.venv/bin/python regression_test.py --test`
+
+4. Once Phase 2 complete, proceed to Phase 3 (solver extraction)
