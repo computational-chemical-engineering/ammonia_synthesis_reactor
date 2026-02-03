@@ -17,7 +17,7 @@
 
 ## Refactoring Roadmap
 
-### Phase 0: Regression Test Harness
+### Phase 0: Regression Test Harness ✅ COMPLETE
 Before modifying any code, establish a reference solution to detect numerical drift during refactoring.
 
 **Reference case** (from `debug.ipynb`):
@@ -37,26 +37,41 @@ config_file = 'debug.json'
 
 **Validation criterion**: L2 relative error < 1e-10 for field arrays after each phase.
 
-### Phase 1: Configuration & Mesh (Foundation)
+**Deliverables**:
+- `regression_test.py` — Test harness with `--save` and `--test` modes
+- `regression_reference.npz` — Saved reference solution
+
+**Commit**: `d9e1027`
+
+### Phase 1: Configuration & Mesh (Foundation) ✅ COMPLETE
 - Extract parameters: Move all `defaults.DEFAULTS` and JSON loading into a `ReactorConfig` class.
 - Abstract the grid: Move `_create_spatial_discretization` into a `ReactorMesh` class.
 - Provide helpers instead of manual slicing (e.g., `[:, :self.num_r_perm, :]`):
 	- `get_retentate_data(full_field)`
 	- `get_permeate_data(full_field)`
 
-### Phase 2: Physics Decoupling
+**Deliverables**:
+- `config.py` — `ReactorConfig` dataclass with validation, merging, serialization
+- `mesh.py` — `ReactorMesh` with grid generation and region helpers
+- Updated `membrane_reactor.py` using new modules (backward-compatible API preserved)
+
+**Commit**: `2261218`
+
+**Regression test**: PASSED (L2 rel error = 0.00e+00)
+
+### Phase 2: Physics Decoupling ⏳ PENDING
 - Stateless residuals: Refactor `_construct_g_conv`, `_construct_g_diff`, and `_construct_g_T` into a `PhysicsEngine`.
 - Pure I/O: Methods take the current state $(c, p, T)$ and return the residual/Jacobian.
 - Remove side effects: Do not modify `self.c_p` or `self.T` during assembly.
 - Matrix assembly: Consolidate `update_csr_array_indices` using a descriptive mapping from local (retentate/permeate) to global (monolithic) matrices.
 
-### Phase 3: Solver Abstraction
+### Phase 3: Solver Abstraction ⏳ PENDING
 - Generalize Newton solver: Extract logic from `_solve_c_p` into a standalone `NewtonSolver`.
 	- Accept `residual_fn`, `jacobian_fn`, and `initial_guess`.
 	- Implement Armijo line-search and convergence monitoring as generic features.
 - Generalize continuation: Move adaptive reaction factor (`_solve_adaptive_react`) and adaptive time-stepping (`_solve_adaptive_dt`) into a `ContinuationManager`.
 
-### Phase 4: Modernization
+### Phase 4: Modernization ⏳ PENDING
 - Type hinting: Apply `numpy.typing.NDArray` to numerical inputs.
 - Logging: Replace `print` statements with a structured logging configuration.
 
@@ -127,6 +142,27 @@ Each phase introduces new modules while the old class continues to pass regressi
 - Non-isothermal logic: Keep segregated solve (Concentration–Pressure vs. Temperature) as an option; allow fully coupled assembly in the future.
 - State immutability: Treat `State` objects as immutable; solvers return new states rather than mutating in place.
 
+## Current Status
+
+**Last updated**: 2026-02-03
+**Branch**: `feat/monolithic`
+**Latest commit**: `2261218` (Phase 1 complete)
+
+| Phase | Status | Commit |
+|-------|--------|--------|
+| Phase 0: Regression Test | ✅ Complete | `d9e1027` |
+| Phase 1: Config & Mesh | ✅ Complete | `2261218` |
+| Phase 2: Physics Decoupling | ⏳ Pending | — |
+| Phase 3: Solver Abstraction | ⏳ Pending | — |
+| Phase 4: Modernization | ⏳ Pending | — |
+
 ## Next Steps
-- Create initial modules: [config.py](config.py) and [mesh.py](mesh.py).
-- Validate mesh indexing; then migrate transport equations from `MembraneReactor` to [physics.py](physics.py).
+1. **Phase 2**: Create `physics.py` with stateless residual/Jacobian assembly
+   - Start by extracting `_construct_g_conv`, `_construct_g_diff` methods
+   - Create `PhysicsEngine` class or module of pure functions
+   - Key methods in `membrane_reactor.py` to refactor:
+     - `_construct_g_c_p()` (~100 lines)
+     - `_construct_g_T()` (~80 lines)
+     - `_construct_darcy_matrices()` (~60 lines)
+2. Run regression test after each change: `.venv/bin/python regression_test.py --test`
+3. Commit incrementally within each phase
