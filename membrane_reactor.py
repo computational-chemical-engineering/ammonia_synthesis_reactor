@@ -18,28 +18,20 @@ from physics import (
     make_dirichlet_bc, get_axial_bcs_for_flow,
     assemble_convection_residual,
     compute_permeate_permeability, compute_packed_bed_permeability,
+    ERGUN_VISCOUS_COEFF, ERGUN_INERTIAL_COEFF,
     HAGEN_POISEUILLE_COEFF, PERM_RAD_FACTOR,
 )
 import defaults  # Import the defaults module (still needed for reload)
 
 # =============================================================================
-# Physical and numerical constants
+# Numerical solver constants
 # =============================================================================
 
-# Ergun equation coefficients for packed bed pressure drop
-ERGUN_VISCOUS_COEFF = 150.0   # Viscous pressure drop coefficient
-ERGUN_INERTIAL_COEFF = 1.75   # Inertial pressure drop coefficient
-
-# Numerical solver constants
 CFL_INIT = 0.1                # Initial CFL number for timestep selection
 EPS_CHEM_TIMESTEP = 1e-8      # Small epsilon for chemical timestep calculation
 MAX_DT_PER_STEP = 500.0       # Maximum temperature change per solve step [K]
 ARMIJO_COEFF = 1e-4           # Armijo sufficient decrease condition
 MIN_LINE_SEARCH_ALPHA = 1e-3  # Minimum step size before line search fails
-
-# Permeability model constants
-PERM_RAD_FACTOR = 10.0        # Radial permeability multiplier for permeate
-HAGEN_POISEUILLE_COEFF = 0.25 # Coefficient in Hagen-Poiseuille law
 
 class TestKinetics:
     def __init__(self, T=None, p=None):
