@@ -5,8 +5,9 @@ Contains generic Newton-Raphson solver with Armijo line search,
 and continuation methods for robust nonlinear solving.
 """
 
-from dataclasses import dataclass, field
-from typing import Callable, Tuple, Optional, Any
+import logging
+from dataclasses import dataclass
+from typing import Callable, Tuple, Optional
 import warnings
 
 import numpy as np
@@ -14,14 +15,19 @@ from numpy.typing import NDArray
 from scipy.sparse import csc_array
 import scipy.sparse.linalg as sla
 
+# Module-level logger
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # Solver configuration
 # =============================================================================
 
+
 @dataclass
 class NewtonConfig:
     """Configuration for Newton solver."""
+
     max_iterations: int = 10
     rtol: float = 1e-6
     atol: float = 0.0
@@ -35,6 +41,7 @@ class NewtonConfig:
 @dataclass
 class NewtonResult:
     """Result of Newton solver."""
+
     converged: bool
     num_iterations: int
     residual_norm: float
@@ -52,6 +59,7 @@ class NewtonResult:
 # =============================================================================
 # Line search
 # =============================================================================
+
 
 def armijo_line_search(
     x: NDArray,
@@ -107,6 +115,7 @@ def armijo_line_search(
 # =============================================================================
 # Newton solver
 # =============================================================================
+
 
 def newton_solve(
     x0: NDArray,
@@ -169,11 +178,16 @@ def newton_solve(
 
         # Apply step (with optional line search)
         if config.use_line_search:
+
             def resid_fn(xv):
                 return residual_fn(xv.reshape(x_shape)).ravel()
 
             x_new, g_norm_new, alpha, ls_success = armijo_line_search(
-                x, dx, g_norm, resid_fn, norm_fn,
+                x,
+                dx,
+                g_norm,
+                resid_fn,
+                norm_fn,
                 armijo_coeff=config.armijo_coeff,
                 min_alpha=config.min_line_search_alpha,
             )
@@ -183,7 +197,7 @@ def newton_solve(
                 warnings.warn(
                     f"Line search failed at iteration {k}: "
                     f"residual {g_norm_new:.2e} > {g_norm:.2e}",
-                    RuntimeWarning
+                    RuntimeWarning,
                 )
         else:
             x[:] = x + dx
@@ -211,9 +225,11 @@ def newton_solve(
 # Continuation methods
 # =============================================================================
 
+
 @dataclass
 class ContinuationConfig:
     """Configuration for continuation solver."""
+
     parameter_max: float = 1.0
     step_init: float = 1e-2
     step_min: float = 1e-4
@@ -226,6 +242,7 @@ class ContinuationConfig:
 @dataclass
 class ContinuationState:
     """State for continuation solver with predictor history."""
+
     parameter: float = 0.0
     step_size: float = 1e-2
 
@@ -300,7 +317,7 @@ def continuation_solve(
         )
 
     x = x0.copy()
-    is_first_step = (state.x_prev is None)
+    is_first_step = state.x_prev is None
 
     while True:
         # Apply predictor if we have history
@@ -309,8 +326,11 @@ def continuation_solve(
 
         # Corrector: Newton solve
         if config.verbose > 1:
-            print(f"Attempting parameter = {state.parameter:.4f} "
-                  f"(step = {state.step_size:.4f})...")
+            logger.info(
+                "Attempting parameter = %.4f (step = %.4f)...",
+                state.parameter,
+                state.step_size,
+            )
 
         x_new, result = solve_fn(x, state.parameter)
 
@@ -326,8 +346,11 @@ def continuation_solve(
 
         if is_converging:
             if config.verbose > 1:
-                print(f"  Converged in {result.num_iterations} iterations, "
-                      f"residual = {result.residual_norm:.2e}")
+                logger.info(
+                    "  Converged in %d iterations, residual = %.2e",
+                    result.num_iterations,
+                    result.residual_norm,
+                )
 
             # Update history and advance parameter
             if not is_first_step:
@@ -337,15 +360,16 @@ def continuation_solve(
 
             x = x_new
             state.parameter = min(
-                state.parameter + state.step_size,
-                config.parameter_max
+                state.parameter + state.step_size, config.parameter_max
             )
             is_first_step = False
 
         else:
             if config.verbose > 1:
-                print(f"  FAILED after {result.num_iterations} iterations. "
-                      "Reducing step size.")
+                logger.warning(
+                    "  Failed after %d iterations. Reducing step size.",
+                    result.num_iterations,
+                )
 
             # Restore and reduce step
             if state.x_prev is not None:
@@ -362,11 +386,11 @@ def continuation_solve(
                     warnings.warn(
                         f"Continuation failed: step size {state.step_size:.2e} "
                         f"< minimum {config.step_min:.2e}",
-                        RuntimeWarning
+                        RuntimeWarning,
                     )
                 return x, False, state
 
     if config.verbose > 1:
-        print(f"\nContinuation completed at parameter = {state.parameter:.4f}")
+        logger.info("Continuation completed at parameter = %.4f", state.parameter)
 
     return x, True, state

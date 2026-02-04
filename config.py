@@ -51,7 +51,9 @@ class ReactorConfig:
     Sel_am_hy: float = 50.0
     Sel_am_ni: float = 1000.0
     Nu_ret: Callable = field(default_factory=lambda: lambda Re, Pr: 0.017 * Re**0.79)
-    Nu_perm: Callable = field(default_factory=lambda: lambda Re, Pr: 0.023 * Re**0.8 * Pr**0.4)
+    Nu_perm: Callable = field(
+        default_factory=lambda: lambda Re, Pr: 0.023 * Re**0.8 * Pr**0.4
+    )
     lambda_mem: float = 16.0
 
     # Reactor properties
@@ -109,18 +111,28 @@ class ReactorConfig:
 
     def __post_init__(self):
         """Convert composition lists to numpy arrays and validate."""
-        self.y_ret_init = np.asarray(self.y_ret_init, dtype=np.float64).reshape((1, 1, -1))
-        self.y_perm_init = np.asarray(self.y_perm_init, dtype=np.float64).reshape((1, 1, -1))
+        self.y_ret_init = np.asarray(self.y_ret_init, dtype=np.float64).reshape(
+            (1, 1, -1)
+        )
+        self.y_perm_init = np.asarray(self.y_perm_init, dtype=np.float64).reshape(
+            (1, 1, -1)
+        )
         self.y_ret_in = np.asarray(self.y_ret_in, dtype=np.float64).reshape((1, 1, -1))
-        self.y_perm_in = np.asarray(self.y_perm_in, dtype=np.float64).reshape((1, 1, -1))
+        self.y_perm_in = np.asarray(self.y_perm_in, dtype=np.float64).reshape(
+            (1, 1, -1)
+        )
         self._validate()
 
     def _validate(self):
         """Validate configuration parameters."""
         if self.r_min >= self.r_max:
-            raise ValueError(f"r_min ({self.r_min}) must be less than r_max ({self.r_max})")
+            raise ValueError(
+                f"r_min ({self.r_min}) must be less than r_max ({self.r_max})"
+            )
         if self.r_max_perm >= self.r_min:
-            raise ValueError(f"r_max_perm ({self.r_max_perm}) must be less than r_min ({self.r_min})")
+            raise ValueError(
+                f"r_max_perm ({self.r_max_perm}) must be less than r_min ({self.r_min})"
+            )
         if self.L <= 0:
             raise ValueError(f"L must be positive, got {self.L}")
         if self.num_r < 4:
@@ -128,7 +140,9 @@ class ReactorConfig:
         if self.num_z < 4:
             raise ValueError(f"num_z must be at least 4, got {self.num_z}")
         if len(self.species) != self.y_ret_in.shape[-1]:
-            raise ValueError(f"Species count ({len(self.species)}) must match composition length ({self.y_ret_in.shape[-1]})")
+            raise ValueError(
+                f"Species count ({len(self.species)}) must match composition length ({self.y_ret_in.shape[-1]})"
+            )
 
     @property
     def num_c(self) -> int:
@@ -148,7 +162,9 @@ class ReactorConfig:
         return cls(**filtered)
 
     @classmethod
-    def from_defaults(cls, config_file: Optional[str] = None, **kwargs) -> "ReactorConfig":
+    def from_defaults(
+        cls, config_file: Optional[str] = None, **kwargs
+    ) -> "ReactorConfig":
         """Create config by merging defaults, JSON file, and kwargs.
 
         Args:

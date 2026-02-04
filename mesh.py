@@ -4,7 +4,7 @@ ReactorMesh: 2D axisymmetric grid for membrane reactor with retentate/permeate r
 Handles grid generation and provides helpers for accessing region-specific data.
 """
 
-from typing import Tuple, Optional
+from typing import Tuple
 import numpy as np
 from numpy.typing import NDArray
 
@@ -36,7 +36,9 @@ class ReactorMesh:
         self.config = config
 
         # Compute radial point distribution
-        self.num_r_perm = int(np.round(config.r_max_perm / config.r_max * config.num_r)) + 3
+        self.num_r_perm = (
+            int(np.round(config.r_max_perm / config.r_max * config.num_r)) + 3
+        )
         self.num_r_ret = config.num_r - self.num_r_perm
         if self.num_r_ret < 2:
             self.num_r_ret = 2
@@ -52,16 +54,24 @@ class ReactorMesh:
         config = self.config
 
         # Retentate radial grid (outer region)
-        dr_ret = (config.r_max - config.r_min) / max(self.num_r_ret - 10, 0.8 * self.num_r_ret)
+        dr_ret = (config.r_max - config.r_min) / max(
+            self.num_r_ret - 10, 0.8 * self.num_r_ret
+        )
         self.r_f_ret = non_uniform_grid(
             config.r_min, config.r_max, self.num_r_ret + 1, dr_ret, 1.2
         )
         self.r_c_ret = 0.5 * (self.r_f_ret[:-1] + self.r_f_ret[1:])
 
         # Permeate radial grid (inner region)
-        dr_perm = (config.r_max_perm - config.r_min_perm) / max(self.num_r_perm - 10, 0.8 * self.num_r_perm)
+        dr_perm = (config.r_max_perm - config.r_min_perm) / max(
+            self.num_r_perm - 10, 0.8 * self.num_r_perm
+        )
         self.r_f_perm = non_uniform_grid(
-            config.r_min_perm, config.r_max_perm, self.num_r_perm + 1, dr_perm, 1.0 / 1.2
+            config.r_min_perm,
+            config.r_max_perm,
+            self.num_r_perm + 1,
+            dr_perm,
+            1.0 / 1.2,
         )
         self.r_c_perm = 0.5 * (self.r_f_perm[:-1] + self.r_f_perm[1:])
 
@@ -72,7 +82,11 @@ class ReactorMesh:
             config.num_z - num_z_sealing - 8, 0.8 * (config.num_z - num_z_sealing)
         )
         z_f_non_uniform = non_uniform_grid(
-            config.Lsealing, config.L, config.num_z + 1 - num_z_sealing, dz_nonuniform, 1.2
+            config.Lsealing,
+            config.L,
+            config.num_z + 1 - num_z_sealing,
+            dz_nonuniform,
+            1.2,
         )
         self.z_f = np.concatenate((z_f_uniform, z_f_non_uniform[1:]), axis=0)
         self.z_c = 0.5 * (self.z_f[:-1] + self.z_f[1:])
@@ -98,7 +112,7 @@ class ReactorMesh:
         Returns:
             View of permeate region with shape (num_z, num_r_perm, ...).
         """
-        return full_field[:, :self.num_r_perm, ...]
+        return full_field[:, : self.num_r_perm, ...]
 
     def get_retentate_data(self, full_field: NDArray) -> NDArray:
         """Extract retentate region from a full field.
@@ -109,7 +123,7 @@ class ReactorMesh:
         Returns:
             View of retentate region with shape (num_z, num_r_ret, ...).
         """
-        return full_field[:, self.num_r_perm:, ...]
+        return full_field[:, self.num_r_perm :, ...]
 
     def split_perm_ret(self, full_field: NDArray) -> Tuple[NDArray, NDArray]:
         """Split full field into permeate and retentate views.

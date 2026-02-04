@@ -2,7 +2,6 @@ import os
 import csv
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import scipy.constants as const
 import json
 import types
@@ -18,17 +17,17 @@ class SafeEncoder(json.JSONEncoder):
             return int(obj)
         elif isinstance(obj, (np.floating, np.float64, np.float32)):
             return float(obj)
-        
+
         # 2. Handle NumPy Arrays
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
-        
+
         # 3. Handle Functions and Lambdas (The fix for your issue)
         elif isinstance(obj, (types.FunctionType, types.LambdaType)) or callable(obj):
             # Return the string representation (e.g. "<function <lambda> at ...>")
             # or you can return "Skipped Function" if you prefer
             return str(obj)
-        
+
         # 4. Fallback for other non-serializable objects
         return super().default(obj)
 
@@ -37,25 +36,25 @@ def calculate_flows(GHSV, vol_reactor, sweep_ratio, H2_N2_ratio, T_STP = 273.15,
     """
     Converts GHSV (1/h) and Geometry to F_ret_in and F_perm_in (mol/s).
     Includes H2:N2 ratio logic.
-    """    
+    """
     # 1. Volumetric Flow at STP (Standard T=273.15K, P=101325 Pa)
     vol_flow_std = (GHSV * vol_reactor) / 3600.0
-    
+
     # 2. Total Molar Flow (Ideal Gas Law at STP)
     F_ret_in = (P_STP * vol_flow_std) / (const.R * T_STP)
-    
+
     # 4. Species Mole Fractions based on H2:N2 Ratio
     # Ratio R = H2/N2 -> H2 = R*N2 -> x_H2 + x_N2 = 1 (assuming pure feed for simplicity)
     # x_N2 * (R + 1) = 1  => x_N2 = 1 / (R + 1)
     y_N2_in = 1.0 / (H2_N2_ratio + 1.0)
     y_H2_in = 1.0 - y_N2_in
-    
-    # Note: If your defaults.py requires specific species fractions, 
+
+    # Note: If your defaults.py requires specific species fractions,
     # you might need to adjust DEFAULTS['x_ret_in'] separately.
-    
+
     # 5. Calculate Permeate Flow
     F_perm_in = F_ret_in * sweep_ratio
-    
+
     return F_ret_in, F_perm_in, y_H2_in, y_N2_in
 
 # --- Main Execution Function ---
@@ -80,8 +79,8 @@ def run_case_studies(csv_path="debug.csv"):
     ]
 
     # Initialize the summary CSV file with header
-    # We open in 'w' mode to overwrite or start fresh. 
-    # If appending to existing logs is desired across multiple runs, 'a' could be used, 
+    # We open in 'w' mode to overwrite or start fresh.
+    # If appending to existing logs is desired across multiple runs, 'a' could be used,
     # but usually a clean start per run is safer unless specified otherwise.
     with open(summary_csv_path, mode='w', newline='') as f:
         writer = csv.writer(f)
@@ -91,11 +90,11 @@ def run_case_studies(csv_path="debug.csv"):
     for index, row in df.iterrows():
         case_id = row['Case_ID']
         print(f"\n=== Running Case: {case_id} ({row['Description']}) ===")
-        
+
         # Create Output Directory
         out_dir = os.path.join("results", case_id)
         os.makedirs(out_dir, exist_ok=True)
-        
+
         # -- Geometry --
         L = row['L_m']
         r_min = DEFAULTS['r_min']
@@ -119,7 +118,7 @@ def run_case_studies(csv_path="debug.csv"):
         T_ret_in = row['T_ret_K']
         T_perm_in = row['T_perm_K']
         is_counter_current = row['Is_Counter_Current']
-   
+
         # 4. Initialize and Solve
         try:
             reactor = MembraneReactor(
@@ -140,7 +139,7 @@ def run_case_studies(csv_path="debug.csv"):
             with open(os.path.join(out_dir, "config.json"), 'w') as f:
                 # Filter out non-serializable items (like numpy arrays) if necessary
                 json.dump(reactor.param_dict, f, indent=4, cls=SafeEncoder)
-            
+
             flows_ret_ax, flows_ret_mem, flows_perm_ax, flows_perm_mem = reactor.compute_flows()
 
             print(f'axial flows retentate side: left {flows_ret_ax[0,:]} right {flows_ret_ax[-1,:]}')

@@ -17,7 +17,6 @@ from pymrm import (
     interp_cntr_to_stagg,
     interp_cntr_to_stagg_tvd,
     upwind,
-    update_csc_array_indices,
 )
 
 
@@ -26,21 +25,21 @@ from pymrm import (
 # =============================================================================
 # Robin-type BCs: a*grad(u) + b*u = d
 
-BC_NONE = {'a': 0, 'b': 0, 'd': 0}           # No boundary (internal face)
-BC_DIRICHLET_HOM = {'a': 0, 'b': 1, 'd': 0}  # Homogeneous Dirichlet: u = 0
-BC_NEUMANN_HOM = {'a': 1, 'b': 0, 'd': 0}    # Homogeneous Neumann: grad(u) = 0
-BC_DIRICHLET = {'a': 0, 'b': 1, 'd': 1}      # Dirichlet with placeholder value
-BC_NEUMANN = {'a': 1, 'b': 0, 'd': 1}        # Neumann with placeholder value
+BC_NONE = {"a": 0, "b": 0, "d": 0}  # No boundary (internal face)
+BC_DIRICHLET_HOM = {"a": 0, "b": 1, "d": 0}  # Homogeneous Dirichlet: u = 0
+BC_NEUMANN_HOM = {"a": 1, "b": 0, "d": 0}  # Homogeneous Neumann: grad(u) = 0
+BC_DIRICHLET = {"a": 0, "b": 1, "d": 1}  # Dirichlet with placeholder value
+BC_NEUMANN = {"a": 1, "b": 0, "d": 1}  # Neumann with placeholder value
 
 
 def make_dirichlet_bc(value: float) -> Dict[str, Any]:
     """Create a Dirichlet BC with specified value."""
-    return {'a': 0, 'b': 1, 'd': value}
+    return {"a": 0, "b": 1, "d": value}
 
 
 def make_neumann_bc(flux: float) -> Dict[str, Any]:
     """Create a Neumann BC with specified flux."""
-    return {'a': 1, 'b': 0, 'd': flux}
+    return {"a": 1, "b": 0, "d": flux}
 
 
 def get_axial_bcs_for_flow(
@@ -82,7 +81,7 @@ def get_axial_bcs_for_flow(
             b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
             a_out = 1.0 - b_out
             d_out = b_out * inflow_value
-            bc_left = {'a': a_out, 'b': b_out, 'd': d_out}
+            bc_left = {"a": a_out, "b": b_out, "d": d_out}
     else:
         # Inlet at z=0 (left), outlet at z=L (right)
         bc_left = bc_inlet  # inlet
@@ -93,7 +92,7 @@ def get_axial_bcs_for_flow(
             b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
             a_out = 1.0 - b_out
             d_out = b_out * inflow_value
-            bc_right = {'a': a_out, 'b': b_out, 'd': d_out}
+            bc_right = {"a": a_out, "b": b_out, "d": d_out}
 
     return bc_left, bc_right
 
@@ -101,6 +100,7 @@ def get_axial_bcs_for_flow(
 # =============================================================================
 # Convection residual assembly
 # =============================================================================
+
 
 def assemble_convection_residual(
     c: NDArray,
@@ -216,10 +216,7 @@ def assemble_diffusion_residual(
     diff_rad_mat = construct_coefficient_matrix(diff_rad, shape_c, axis=1)
 
     # Assemble diffusion Jacobian: div(-D*grad(c))
-    jac_diff = (
-        div_ax @ (-diff_ax_mat) @ grad_ax
-        + div_rad @ (-diff_rad_mat) @ grad_rad
-    )
+    jac_diff = div_ax @ (-diff_ax_mat) @ grad_ax + div_rad @ (-diff_rad_mat) @ grad_rad
 
     # Boundary contribution
     g_bc = div_ax @ ((-diff_ax_mat) @ grad_bc_ax)
@@ -230,6 +227,7 @@ def assemble_diffusion_residual(
 # =============================================================================
 # Temperature residual helpers
 # =============================================================================
+
 
 def assemble_temperature_convection(
     T: NDArray,
@@ -303,12 +301,12 @@ def assemble_temperature_convection(
 # =============================================================================
 
 # Ergun equation coefficients for packed bed pressure drop
-ERGUN_VISCOUS_COEFF = 150.0   # Viscous term coefficient
-ERGUN_INERTIAL_COEFF = 1.75   # Inertial term coefficient
+ERGUN_VISCOUS_COEFF = 150.0  # Viscous term coefficient
+ERGUN_INERTIAL_COEFF = 1.75  # Inertial term coefficient
 
 # Permeability model constants
-PERM_RAD_FACTOR = 10.0        # Radial permeability multiplier for permeate
-HAGEN_POISEUILLE_COEFF = 0.25 # Coefficient in Hagen-Poiseuille law
+PERM_RAD_FACTOR = 10.0  # Radial permeability multiplier for permeate
+HAGEN_POISEUILLE_COEFF = 0.25  # Coefficient in Hagen-Poiseuille law
 
 
 def compute_permeate_permeability(
@@ -327,7 +325,9 @@ def compute_permeate_permeability(
         Tuple of (k_axial, k_radial) permeability fields.
     """
     # Axial: parabolic velocity profile
-    k_axial = HAGEN_POISEUILLE_COEFF * (r_max_perm**2 - r_c**2).reshape((1, -1)) / viscosity
+    k_axial = (
+        HAGEN_POISEUILLE_COEFF * (r_max_perm**2 - r_c**2).reshape((1, -1)) / viscosity
+    )
     # Radial: enhanced permeability
     k_radial = PERM_RAD_FACTOR * r_max_perm**2 / viscosity
     return k_axial, k_radial
@@ -375,6 +375,7 @@ def compute_packed_bed_permeability(
 # Membrane permeation
 # =============================================================================
 
+
 def compute_membrane_permeabilities(
     species: list,
     Perm_NH3: float,
@@ -404,9 +405,9 @@ def compute_membrane_permeabilities(
 
     # Build permeability dict from selectivity ratios
     perm_dict = {
-        'NH3': Perm_NH3,
-        'H2': Perm_NH3 / Sel_am_hy,
-        'N2': Perm_NH3 / Sel_am_ni,
+        "NH3": Perm_NH3,
+        "H2": Perm_NH3 / Sel_am_hy,
+        "N2": Perm_NH3 / Sel_am_ni,
     }
 
     # Create permeability array
@@ -453,7 +454,7 @@ def compute_inlet_flux_permeate(
 
     # Average (1 - r^2) over each cell: integral of (1-r^2) from r1 to r2
     # = (2 - r2^2 - r1^2) for parabolic profile factor
-    parabolic_factor = 2.0 - r_norm[1:]**2 - r_norm[:-1]**2
+    parabolic_factor = 2.0 - r_norm[1:] ** 2 - r_norm[:-1] ** 2
 
     # Base flux = F / (pi * R^2)
     base_flux = F_in / (np.pi * r_max_perm**2)
@@ -491,6 +492,5 @@ def compute_inlet_flux_retentate(
     base_flux = F_in / A_annulus
 
     return np.broadcast_to(
-        (base_flux * y_in).reshape((1, -1, num_species)),
-        (1, num_r_ret, num_species)
+        (base_flux * y_in).reshape((1, -1, num_species)), (1, num_r_ret, num_species)
     )
