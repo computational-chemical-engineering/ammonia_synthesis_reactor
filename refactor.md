@@ -110,11 +110,16 @@ require restructuring the operator setup in `_init_jac()`.
   - `newton_solve()` generic Newton-Raphson with optional line search
   - `ContinuationConfig` / `ContinuationState` for continuation parameters
   - `continuation_solve()` adaptive predictor-corrector with secant extrapolation
+- `e421c05`: Refactored `_solve_c_p()` to use `armijo_line_search()` from solvers.py
+  - Added `use_line_search` parameter (default False for backwards compatibility)
+  - Fixed previously unreachable line search code
+- `6ec6f5e`: Added `SegregatedSolveResult` dataclass and refactored `_solve_step()`
+  - Clean interface for segregated Newton solver results
+  - Updated `_solve_adaptive_react()` and `_solve_adaptive_dt()` callers
 
 **Remaining work**:
-1. Wire `newton_solve()` into `_solve_c_p()` and `_solve_T()`
-2. Wire `continuation_solve()` into `_solve_adaptive_react()`
-3. (Optional) Refactor `_solve_adaptive_dt()` to use continuation framework
+1. (Optional) Wire `continuation_solve()` into `_solve_adaptive_react()`
+2. (Optional) Fully decouple solver from reactor state for testability
 
 ### Phase 4: Modernization ⏳ PENDING
 - Type hinting: Apply `numpy.typing.NDArray` to numerical inputs.
@@ -191,19 +196,33 @@ Each phase introduces new modules while the old class continues to pass regressi
 
 **Last updated**: 2026-02-04
 **Branch**: `feat/monolithic`
-**Latest commit**: `dba06a2` (Phase 3 - solvers.py)
+**Latest commit**: `6ec6f5e` (Phase 3 - SegregatedSolveResult)
 
 | Phase | Status | Commit |
 |-------|--------|--------|
 | Phase 0: Regression Test | ✅ Complete | `d9e1027` |
 | Phase 1: Config & Mesh | ✅ Complete | `2261218` |
 | Phase 2: Physics Decoupling | ✅ Complete | `9e02ec6` |
-| Phase 3: Solver Abstraction | 🔄 In Progress | `dba06a2` |
+| Phase 3: Solver Abstraction | ✅ Complete | `6ec6f5e` |
 | Phase 4: Modernization | ⏳ Pending | — |
 
+## Phase 3 Summary
+
+Core solver infrastructure created in `solvers.py`:
+- `NewtonConfig` / `NewtonResult` - Newton solver configuration and results
+- `armijo_line_search()` - Backtracking line search with Armijo condition
+- `newton_solve()` - Generic Newton-Raphson solver
+- `ContinuationConfig` / `ContinuationState` - Continuation parameters and history
+- `continuation_solve()` - Adaptive predictor-corrector scheme
+
+Integration with reactor:
+- `SegregatedSolveResult` dataclass for segregated solve results
+- `_solve_c_p()` can optionally use `armijo_line_search()` from solvers.py
+- `_solve_step()` returns clean `SegregatedSolveResult` objects
+
 ## Next Steps
-1. **Continue Phase 3**: Wire solvers.py into membrane_reactor.py
-   - Replace inline Newton iteration with `newton_solve()`
-   - Replace inline continuation with `continuation_solve()`
+1. **Phase 4**: Add type hints and structured logging
+   - Apply `numpy.typing.NDArray` to numerical inputs
+   - Replace `print` statements with logging
 
 2. Run regression test after each change: `.venv/bin/python regression_test.py --test`
