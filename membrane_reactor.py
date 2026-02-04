@@ -160,6 +160,43 @@ class MembraneReactor:
         dt_cfl = self._compute_dt_cfl(cfl=CFL_INIT)
         self.solve(num_timesteps=2, dt=dt_cfl)
 
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to config and mesh for backwards compatibility.
+
+        Args:
+            name: Attribute name to look up.
+
+        Returns:
+            Attribute value from _config or _mesh.
+
+        Raises:
+            AttributeError: If attribute not found in config or mesh.
+        """
+        # Avoid infinite recursion during initialization
+        if name.startswith("_"):
+            raise AttributeError(
+                f"'{type(self).__name__}' has no attribute '{name}'"
+            )
+
+        # Try config first, then mesh
+        try:
+            config = object.__getattribute__(self, "_config")
+            if hasattr(config, name):
+                return getattr(config, name)
+        except AttributeError:
+            pass
+
+        try:
+            mesh = object.__getattribute__(self, "_mesh")
+            if hasattr(mesh, name):
+                return getattr(mesh, name)
+        except AttributeError:
+            pass
+
+        raise AttributeError(
+            f"'{type(self).__name__}' has no attribute '{name}'"
+        )
+
     def _init_config(self, config_file, kwargs):
         """Load and merge configuration from defaults, file, and kwargs.
 
@@ -181,13 +218,6 @@ class MembraneReactor:
         # Create ReactorConfig (handles merging and validation)
         self._config = ReactorConfig.from_defaults(config_file, **kwargs)
 
-        # Copy all config attributes to self for backward compatibility
-        # Include callables like Nu_ret, Nu_perm (Nusselt correlations)
-        from dataclasses import fields as dataclass_fields
-
-        for f in dataclass_fields(self._config):
-            setattr(self, f.name, getattr(self._config, f.name))
-
         # Store param_dict for serialization (legacy)
         self.param_dict = self._config.to_dict()
 
@@ -195,26 +225,13 @@ class MembraneReactor:
         """Compute geometry-dependent counts, densities, permeabilities & inlets.
 
         Populates:
-            num_r_perm / num_r_ret, membrane permeability
-            array (self.perm), inlet flux distributions, Reynolds/Schmidt groups.
+            Mesh object, membrane permeability array (self.perm),
+            inlet flux distributions, Reynolds/Schmidt groups.
         """
-        # y_* arrays are already reshaped by ReactorConfig
-
-        self.num_c = self._config.num_c
-        self.rho_b = self._config.rho_b
-
         self.correlation = GasMixtureCorrelations(self.species, self.database)
 
-        # Create mesh and copy grid attributes for backward compatibility
+        # Create mesh (attributes accessed via __getattr__)
         self._mesh = ReactorMesh(self._config)
-        self.num_r_perm = self._mesh.num_r_perm
-        self.num_r_ret = self._mesh.num_r_ret
-        self.r_f_ret = self._mesh.r_f_ret
-        self.r_c_ret = self._mesh.r_c_ret
-        self.r_f_perm = self._mesh.r_f_perm
-        self.r_c_perm = self._mesh.r_c_perm
-        self.z_f = self._mesh.z_f
-        self.z_c = self._mesh.z_c
 
         # membrane permeabilities
         self.perm = compute_membrane_permeabilities(
@@ -739,12 +756,17 @@ class MembraneReactor:
 
         Returns:
             Tuple of (c_perm, c_ret) views/slices.
+
+        Raises:
+            ValueError: If c does not have expected radial dimension.
         """
         c = np.asarray(c)
         if c.ndim > 1 and c.shape[1] == self.num_r:
             return self._mesh.split_perm_ret(c)
-        # Fallback for non-conforming arrays
-        return c, c
+        raise ValueError(
+            f"Expected field with shape (num_z, {self.num_r}, ...), "
+            f"got shape {c.shape}"
+        )
 
     def _get_axial_bcs_for_flow_direction(
         self,
