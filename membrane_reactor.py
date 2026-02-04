@@ -19,6 +19,7 @@ from physics import (
     assemble_convection_residual,
     compute_permeate_permeability, compute_packed_bed_permeability,
     compute_membrane_permeabilities,
+    compute_inlet_flux_permeate, compute_inlet_flux_retentate,
     ERGUN_VISCOUS_COEFF, ERGUN_INERTIAL_COEFF,
     HAGEN_POISEUILLE_COEFF, PERM_RAD_FACTOR,
 )
@@ -175,10 +176,21 @@ class MembraneReactor:
         #self.Pm = np.pi * self.r_min  # Membrane circumference [m]
         #self.Vtot = self.Ab * self.L  # Total reactor volume (excluding permeate) [m³]
 
-        # Reactor Flow Conditions
-        r_f_ret = self.r_f_perm/self.r_max_perm
-        self.flux_perm_in = (self.F_perm_in / (np.pi * self.r_max_perm**2)) * (2.0-r_f_ret[1:]*r_f_ret[1:]-r_f_ret[0:-1]*r_f_ret[0:-1]).reshape((1,-1,1))*self.y_perm_in
-        self.flux_ret_in = np.broadcast_to(np.asarray(self.F_ret_in / (np.pi * (self.r_max**2 - self.r_min**2))).reshape((1,-1,1))*self.y_ret_in, shape= (1,self.num_r_ret, self.num_c))
+        # Reactor Flow Conditions - inlet fluxes
+        self.flux_perm_in = compute_inlet_flux_permeate(
+            F_in=self.F_perm_in,
+            r_max_perm=self.r_max_perm,
+            r_f_perm=self.r_f_perm,
+            y_in=self.y_perm_in,
+        )
+        self.flux_ret_in = compute_inlet_flux_retentate(
+            F_in=self.F_ret_in,
+            r_min=self.r_min,
+            r_max=self.r_max,
+            y_in=self.y_ret_in,
+            num_r_ret=self.num_r_ret,
+            num_species=self.num_c,
+        )
               
         rho_g = self.correlation.density(self.y_ret_init, self.T_ret_init, self.p_ret_out)  # Gas density [kg/m³]
         viscosity = self.correlation.viscosity(self.y_ret_init, self.T_ret_init)  # Gas viscosity [Pa s]

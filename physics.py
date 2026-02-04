@@ -424,3 +424,73 @@ def compute_membrane_permeabilities(
         perm[sealing_mask, :] = 0.0
 
     return perm
+
+
+def compute_inlet_flux_permeate(
+    F_in: float,
+    r_max_perm: float,
+    r_f_perm: NDArray,
+    y_in: NDArray,
+) -> NDArray:
+    """Compute inlet molar flux for permeate side (parabolic profile).
+
+    Uses parabolic velocity profile for laminar pipe flow:
+        u(r) = u_max * (1 - (r/R)^2)
+
+    The flux at each radial cell is averaged over the cell faces.
+
+    Args:
+        F_in: Total inlet molar flow rate [mol/s]
+        r_max_perm: Maximum permeate radius [m]
+        r_f_perm: Radial face coordinates for permeate, shape (num_r_perm+1,)
+        y_in: Inlet mole fractions, shape (1, 1, num_species)
+
+    Returns:
+        Inlet flux array of shape (1, num_r_perm, num_species)
+    """
+    # Normalized radial positions
+    r_norm = r_f_perm / r_max_perm
+
+    # Average (1 - r^2) over each cell: integral of (1-r^2) from r1 to r2
+    # = (2 - r2^2 - r1^2) for parabolic profile factor
+    parabolic_factor = 2.0 - r_norm[1:]**2 - r_norm[:-1]**2
+
+    # Base flux = F / (pi * R^2)
+    base_flux = F_in / (np.pi * r_max_perm**2)
+
+    return base_flux * parabolic_factor.reshape((1, -1, 1)) * y_in
+
+
+def compute_inlet_flux_retentate(
+    F_in: float,
+    r_min: float,
+    r_max: float,
+    y_in: NDArray,
+    num_r_ret: int,
+    num_species: int,
+) -> NDArray:
+    """Compute inlet molar flux for retentate side (uniform profile).
+
+    Assumes uniform velocity distribution across the annular cross-section.
+
+    Args:
+        F_in: Total inlet molar flow rate [mol/s]
+        r_min: Inner radius of annulus (membrane) [m]
+        r_max: Outer radius of annulus [m]
+        y_in: Inlet mole fractions, shape (1, 1, num_species)
+        num_r_ret: Number of radial cells in retentate
+        num_species: Number of species
+
+    Returns:
+        Inlet flux array of shape (1, num_r_ret, num_species)
+    """
+    # Cross-sectional area of annulus
+    A_annulus = np.pi * (r_max**2 - r_min**2)
+
+    # Uniform flux
+    base_flux = F_in / A_annulus
+
+    return np.broadcast_to(
+        (base_flux * y_in).reshape((1, -1, num_species)),
+        (1, num_r_ret, num_species)
+    )
