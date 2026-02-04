@@ -3,8 +3,10 @@ import logging
 import math
 import warnings
 from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
 import scipy.sparse.linalg as sla
 from pymrm import (
     NumJac,
@@ -72,7 +74,7 @@ class SegregatedSolveResult:
         """Pressure convergence factor."""
         return self.g_p_norm / self.g_p_norm_init if self.g_p_norm_init > 0 else 0.0
 
-    def as_tuple(self):
+    def as_tuple(self) -> Tuple[int, float, float, bool, float, float]:
         """Return legacy tuple format for backwards compatibility."""
         return (
             self.num_iterations,
@@ -121,14 +123,21 @@ class MembraneReactor:
     BC_DIRICHLET = BC_DIRICHLET
     BC_NEUMANN = BC_NEUMANN
 
-    def __init__(self, config_file=None, c=None, p=None, T=None, **kwargs):
+    def __init__(
+        self,
+        config_file: Optional[str] = None,
+        c: Optional[NDArray[np.float64]] = None,
+        p: Optional[NDArray[np.float64]] = None,
+        T: Optional[NDArray[np.float64]] = None,
+        **kwargs: Any,
+    ) -> None:
         """Construct reactor, load defaults, apply overrides, allocate fields.
 
         Args:
-            config_file (str|None): Optional JSON file overriding defaults.
-            c (ndarray|None): Initial concentration field (z,r,s).
-            p (ndarray|None): Initial pressure field (z,r).
-            T (ndarray|None): Initial temperature field (z,r).
+            config_file: Optional JSON file overriding defaults.
+            c: Initial concentration field (num_z, num_r, num_c).
+            p: Initial pressure field (num_z, num_r).
+            T: Initial temperature field (num_z, num_r).
             **kwargs: Explicit overrides of default parameters.
 
         Side Effects:
@@ -256,8 +265,16 @@ class MembraneReactor:
         self.conv_factor_min = math.exp(-self.newton_conv_rate_min)
 
     def _init_fields(self, c=None, p=None, T=None):
-        """
-        Initialize the concentration field.
+        """Initialize concentration, pressure, temperature, and velocity fields.
+
+        Args:
+            c: Initial concentration field (num_z, num_r, num_c). If None, uses
+                equilibrium values based on inlet compositions.
+            p: Initial pressure field (num_z, num_r). If None, uses outlet pressures.
+            T: Initial temperature field (num_z, num_r). If None, uses inlet temps.
+
+        Returns:
+            Tuple of (c_p, T) initialized field arrays.
         """
         shape_c_p = (self.num_z, self.num_r, self.num_c + 1)
         shape_c = (self.num_z, self.num_r, self.num_c)
@@ -346,22 +363,55 @@ class MembraneReactor:
         return self.c_p, self.T
 
     def _init_jac(self):
+        """Initialize Jacobian matrices for the coupled system.
+
+        Sets up divergence, gradient, and boundary operators for concentration,
+        pressure, and temperature fields in both permeate and retentate regions,
+        then shifts indices to form a monolithic discretization.
         """
-        Initialize the Jacobian matrices for the system.
-        This includes setting up the accumulation, convection, and diffusion terms.
-        """
-        shape_c = (self.num_z, self.num_r, self.num_c)
-        shape_c_ret = (self.num_z, self.num_r_ret, self.num_c)
-        shape_c_perm = (self.num_z, self.num_r_perm, self.num_c)
-        shape_p = (self.num_z, self.num_r)
-        shape_p_ret = (self.num_z, self.num_r_ret)
-        shape_p_perm = (self.num_z, self.num_r_perm)
+        # Define field shapes
+        self._shapes = {
+            "c": (self.num_z, self.num_r, self.num_c),
+            "c_ret": (self.num_z, self.num_r_ret, self.num_c),
+            "c_perm": (self.num_z, self.num_r_perm, self.num_c),
+            "p": (self.num_z, self.num_r),
+            "p_ret": (self.num_z, self.num_r_ret),
+            "p_perm": (self.num_z, self.num_r_perm),
+        }
 
         # Get flow-direction-dependent boundary conditions
         bc_ret_ax, bc_p_ret_ax, bc_T_ret_ax = self._get_axial_bcs_for_flow_direction()
 
+        # Initialize operators for each field type
+        jac_c_accum_perm, jac_c_accum_ret = self._init_concentration_operators(
+            bc_ret_ax
+        )
+        self._init_pressure_operators(bc_p_ret_ax)
+        self._init_temperature_operators(bc_T_ret_ax)
+
+        # Shift to monolithic indexing and combine accumulation matrices
+        self._shift_to_monolithic_indices(jac_c_accum_perm, jac_c_accum_ret)
+
+        # Initialize auxiliary matrices
+        self._init_auxiliary_matrices()
+
+    def _init_concentration_operators(self, bc_ret_ax):
+        """Initialize divergence and gradient operators for concentration fields.
+
+        Args:
+            bc_ret_ax: Axial boundary conditions for retentate concentration.
+
+        Returns:
+            Tuple of (jac_c_accum_perm, jac_c_accum_ret) accumulation matrices.
+        """
+        shape_c_perm = self._shapes["c_perm"]
+        shape_c_ret = self._shapes["c_ret"]
+
+        # Accumulation matrices
         jac_c_accum_perm = construct_coefficient_matrix(1.0, shape_c_perm)
         jac_c_accum_ret = construct_coefficient_matrix(self.eps, shape_c_ret)
+
+        # Divergence operators
         self.div_c_perm_ax = construct_div(shape_c_perm, self.z_f, nu=0, axis=0)
         self.div_c_perm_rad = construct_div(
             shape_c_perm, self.r_f_perm, nu=self.nu, axis=1
@@ -370,6 +420,8 @@ class MembraneReactor:
         self.div_c_ret_rad = construct_div(
             shape_c_ret, self.r_f_ret, nu=self.nu, axis=1
         )
+
+        # Gradient operators - permeate
         self.grad_c_perm_ax, self.grad_bc_c_perm_ax = construct_grad(
             shape_c_perm,
             self.z_f,
@@ -384,6 +436,8 @@ class MembraneReactor:
             bc=(self.BC_NEUMANN_HOM, self.BC_NONE),
             axis=1,
         )
+
+        # Gradient operators - retentate
         self.grad_c_ret_ax, self.grad_bc_c_ret_ax = construct_grad(
             shape_c_ret, self.z_f, self.z_c, bc_ret_ax, axis=0
         )
@@ -394,6 +448,8 @@ class MembraneReactor:
             bc=(self.BC_NONE, self.BC_NEUMANN_HOM),
             axis=1,
         )
+
+        # Membrane boundary value matrices
         self.c_matrix_perm_mem, _ = construct_boundary_value_matrices(
             shape_c_perm, self.r_f_perm, self.r_c_perm, bc=None, bound_id=1, axis=1
         )
@@ -401,6 +457,18 @@ class MembraneReactor:
             shape_c_ret, self.r_f_ret, self.r_c_ret, bc=None, bound_id=0, axis=1
         )
 
+        return jac_c_accum_perm, jac_c_accum_ret
+
+    def _init_pressure_operators(self, bc_p_ret_ax):
+        """Initialize divergence and gradient operators for pressure fields.
+
+        Args:
+            bc_p_ret_ax: Axial boundary conditions for retentate pressure.
+        """
+        shape_p_perm = self._shapes["p_perm"]
+        shape_p_ret = self._shapes["p_ret"]
+
+        # Divergence operators
         self.div_p_perm_ax = construct_div(shape_p_perm, self.z_f, nu=0, axis=0)
         self.div_p_perm_rad = construct_div(
             shape_p_perm, self.r_f_perm, nu=self.nu, axis=1
@@ -409,6 +477,8 @@ class MembraneReactor:
         self.div_p_ret_rad = construct_div(
             shape_p_ret, self.r_f_ret, nu=self.nu, axis=1
         )
+
+        # Gradient operators - permeate
         self.grad_p_perm_ax, self.grad_bc_p_perm_ax = construct_grad(
             shape_p_perm,
             self.z_f,
@@ -424,6 +494,8 @@ class MembraneReactor:
             bc=(self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM),
             axis=1,
         )
+
+        # Gradient operators - retentate
         self.grad_p_ret_ax, self.grad_bc_p_ret_ax = construct_grad(
             shape_p_ret, self.z_f, self.z_c, bc=bc_p_ret_ax, axis=0
         )
@@ -436,7 +508,20 @@ class MembraneReactor:
             axis=1,
         )
 
+    def _init_temperature_operators(self, bc_T_ret_ax):
+        """Initialize gradient operators for temperature fields.
+
+        Args:
+            bc_T_ret_ax: Axial boundary conditions for retentate temperature.
+        """
+        shape_p = self._shapes["p"]
+        shape_p_perm = self._shapes["p_perm"]
+        shape_p_ret = self._shapes["p_ret"]
+
+        # Accumulation matrix
         self.jac_T_accum = construct_coefficient_matrix(1.0, shape_p)
+
+        # Gradient operators - permeate
         self.grad_T_perm_ax, self.grad_bc_T_perm_ax = construct_grad(
             shape_p_perm,
             self.z_f,
@@ -453,6 +538,8 @@ class MembraneReactor:
             axis=1,
             shapes_d=(None, (self.num_z, 1)),
         )
+
+        # Gradient operators - retentate
         self.grad_T_ret_ax, self.grad_bc_T_ret_ax = construct_grad(
             shape_p_ret, self.z_f, self.z_c, bc_T_ret_ax, axis=0
         )
@@ -466,27 +553,48 @@ class MembraneReactor:
             shapes_d=((self.num_z, 1), None),
         )
 
-        # shift retentate-side matrix indices to (later) build a monolithic spatial discretization
-        offset = (0, self.num_r_perm, 0)
+    def _shift_to_monolithic_indices(self, jac_c_accum_perm, jac_c_accum_ret):
+        """Shift region-specific operators to monolithic (combined) indexing.
+
+        Combines permeate and retentate operators into a single system by
+        offsetting retentate indices appropriately.
+
+        Args:
+            jac_c_accum_perm: Permeate accumulation matrix.
+            jac_c_accum_ret: Retentate accumulation matrix.
+        """
+        shape_c = self._shapes["c"]
+        shape_c_ret = self._shapes["c_ret"]
+        shape_c_perm = self._shapes["c_perm"]
+        shape_p = self._shapes["p"]
+        shape_p_ret = self._shapes["p_ret"]
+        shape_p_perm = self._shapes["p_perm"]
+
+        # Index offsets for retentate region
+        offset_c = (0, self.num_r_perm, 0)
         offset_p = (0, self.num_r_perm)
+
+        # Concentration accumulation
         jac_c_accum_perm = update_csc_array_indices(
             jac_c_accum_perm, shape_c_perm, shape_c
         )
         jac_c_accum_ret = update_csc_array_indices(
-            jac_c_accum_ret, shape_c_ret, shape_c, offset=offset
+            jac_c_accum_ret, shape_c_ret, shape_c, offset=offset_c
         )
         self.jac_c_accum = jac_c_accum_perm + jac_c_accum_ret
+
+        # Concentration divergence operators
         self.div_c_ret_ax = update_csc_array_indices(
             self.div_c_ret_ax,
             (shape_c_ret, None),
             (shape_c, None),
-            offset=(offset, None),
+            offset=(offset_c, None),
         )
         self.div_c_ret_rad = update_csc_array_indices(
             self.div_c_ret_rad,
             (shape_c_ret, None),
             (shape_c, None),
-            offset=(offset, None),
+            offset=(offset_c, None),
         )
         self.div_c_perm_ax = update_csc_array_indices(
             self.div_c_perm_ax, (shape_c_perm, None), (shape_c, None)
@@ -494,17 +602,19 @@ class MembraneReactor:
         self.div_c_perm_rad = update_csc_array_indices(
             self.div_c_perm_rad, (shape_c_perm, None), (shape_c, None)
         )
+
+        # Concentration gradient operators
         self.grad_c_ret_ax = update_csc_array_indices(
             self.grad_c_ret_ax,
             (None, shape_c_ret),
             (None, shape_c),
-            offset=(None, offset),
+            offset=(None, offset_c),
         )
         self.grad_c_ret_rad = update_csc_array_indices(
             self.grad_c_ret_rad,
             (None, shape_c_ret),
             (None, shape_c),
-            offset=(None, offset),
+            offset=(None, offset_c),
         )
         self.grad_c_perm_ax = update_csc_array_indices(
             self.grad_c_perm_ax, (None, shape_c_perm), (None, shape_c)
@@ -512,16 +622,19 @@ class MembraneReactor:
         self.grad_c_perm_rad = update_csc_array_indices(
             self.grad_c_perm_rad, (None, shape_c_perm), (None, shape_c)
         )
+
+        # Concentration membrane matrices
         self.c_matrix_ret_mem = update_csc_array_indices(
             self.c_matrix_ret_mem,
             (None, shape_c_ret),
             (None, shape_c),
-            offset=(None, offset),
+            offset=(None, offset_c),
         )
         self.c_matrix_perm_mem = update_csc_array_indices(
             self.c_matrix_perm_mem, (None, shape_c_perm), (None, shape_c)
         )
 
+        # Pressure divergence operators
         self.div_p_ret_ax = update_csc_array_indices(
             self.div_p_ret_ax,
             (shape_p_ret, None),
@@ -540,6 +653,8 @@ class MembraneReactor:
         self.div_p_perm_rad = update_csc_array_indices(
             self.div_p_perm_rad, (shape_p_perm, None), (shape_p, None)
         )
+
+        # Pressure gradient operators
         self.grad_p_ret_ax = update_csc_array_indices(
             self.grad_p_ret_ax,
             (None, shape_p_ret),
@@ -559,6 +674,7 @@ class MembraneReactor:
             self.grad_p_perm_rad, (None, shape_p_perm), (None, shape_p)
         )
 
+        # Temperature gradient operators
         self.grad_T_ret_ax = update_csc_array_indices(
             self.grad_T_ret_ax,
             (None, shape_p_ret),
@@ -577,13 +693,25 @@ class MembraneReactor:
         self.grad_T_perm_rad = update_csc_array_indices(
             self.grad_T_perm_rad, (None, shape_p_perm), (None, shape_p)
         )
+
+    def _init_auxiliary_matrices(self):
+        """Initialize Darcy matrices, numerical Jacobian helpers, and inlet flux."""
+        shape_c = self._shapes["c"]
+        shape_c_ret = self._shapes["c_ret"]
+        shape_p = self._shapes["p"]
+
         self._construct_darcy_matrices()
 
+        # Numerical Jacobian helpers for reaction and pressure coupling
         self.numjac = NumJac(shape_c_ret)
         self.numjac_p = NumJac(shape_p + (1,))
+
+        # Summation matrix (concentration to total)
         self.sum_c = construct_coefficient_matrix(
             np.array([[[1.0]]]), shape=(shape_p + (1,), shape_c)
         )
+
+        # Inlet flux contribution to residual
         self.g_c_in = (
             self.div_c_perm_ax[:, 0 : self.flux_perm_in.size]
             @ self.flux_perm_in.ravel()
@@ -601,14 +729,16 @@ class MembraneReactor:
 
         self._jac = None
 
-    def _split_perm_and_ret(self, c):
+    def _split_perm_and_ret(
+        self, c: NDArray[np.float64]
+    ) -> Tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Split full field into permeate and retentate views.
 
         Args:
-            c (ndarray): Field with shape (num_z, num_r, ...).
+            c: Field with shape (num_z, num_r, ...).
 
         Returns:
-            tuple: (c_perm, c_ret) views/slices.
+            Tuple of (c_perm, c_ret) views/slices.
         """
         c = np.asarray(c)
         if c.ndim > 1 and c.shape[1] == self.num_r:
@@ -616,15 +746,17 @@ class MembraneReactor:
         # Fallback for non-conforming arrays
         return c, c
 
-    def _get_axial_bcs_for_flow_direction(self):
+    def _get_axial_bcs_for_flow_direction(
+        self,
+    ) -> Tuple[Tuple[Dict, Dict], Tuple[Dict, Dict], Tuple[Dict, Dict]]:
         """Return boundary condition tuples based on flow direction.
 
         For co-current flow, inlet is at z=0 and outlet at z=L.
         For counter-current flow, retentate inlet is at z=L and outlet at z=0.
 
         Returns:
-            tuple: (bc_c_ret_ax, bc_p_ret_ax, bc_T_ret_ax) boundary conditions
-                   for concentration, pressure, and temperature on retentate side.
+            Tuple of (bc_c_ret_ax, bc_p_ret_ax, bc_T_ret_ax) boundary conditions
+            for concentration, pressure, and temperature on retentate side.
         """
         if self.is_counter_current:
             bc_c_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
@@ -637,9 +769,15 @@ class MembraneReactor:
         return bc_c_ret_ax, bc_p_ret_ax, bc_T_ret_ax
 
     def _construct_darcy_matrices(self, c=None, T=None, p=None):
-        """Assemble permeability-weighted matrices for velocity (Darcy / Ergun).
+        """Assemble permeability-weighted matrices for velocity (Darcy/Ergun).
 
-        Uses Hagen-Poiseuille for permeate side and Ergun equation for packed bed.
+        Uses Hagen-Poiseuille for laminar flow in permeate side and Ergun
+        equation for pressure drop in the packed bed retentate side.
+
+        Args:
+            c: Concentration field. Defaults to self.c_p[..., :-1].
+            T: Temperature field. Defaults to self.T.
+            p: Pressure field. Defaults to self.c_p[..., -1].
         """
         if c is None:
             c = self.c_p[..., :-1]
@@ -731,11 +869,16 @@ class MembraneReactor:
         return jac_darcy
 
     def _construct_g_diff(self, c=None, T=None, p=None, compute_jac=False):
-        """
-        Update the transport coefficients based on the current concentration field.
+        """Assemble diffusion and membrane permeation residual.
 
-        Parameters:
-        - c (numpy.ndarray): Current concentration field.
+        Args:
+            c: Concentration field (num_z, num_r, num_c). Defaults to self.c_p.
+            T: Temperature field (num_z, num_r). Defaults to self.T.
+            p: Pressure field (num_z, num_r). Defaults to self.c_p[...,-1].
+            compute_jac: If True, compute and cache the Jacobian.
+
+        Returns:
+            Tuple of (g_diff, jac_diff) where jac_diff is None if compute_jac=False.
         """
         shape_c_ret = (self.num_z, self.num_r_ret, self.num_c)
         shape_c_perm = (self.num_z, self.num_r_perm, self.num_c)
@@ -1026,16 +1169,18 @@ class MembraneReactor:
     def _construct_g_c_p(
         self, c_old, T_old, dt, compute_jac=False, kinetics_as_source=False
     ):
-        """
-        Construct the residual vector g and the Jacobian matrix for the system.
+        """Construct coupled concentration-pressure residual and Jacobian.
 
-        Parameters:
-        - c_p (numpy.ndarray): Current concentration field.
-        - c_old (numpy.ndarray): Previous concentration field.
+        Args:
+            c_old: Previous concentration field for transient term.
+            T_old: Previous temperature field (unused, for API consistency).
+            dt: Time step size.
+            compute_jac: If True, compute the Jacobian matrix.
+            kinetics_as_source: If True, use cached reaction source term.
 
         Returns:
-        - g (numpy.ndarray): Residual vector.
-        - Jac (scipy.sparse.csc_matrix): Jacobian matrix.
+            Tuple of (g, jac) where g is the residual array (num_z, num_r, num_c+1)
+            and jac is the sparse Jacobian (or None if compute_jac=False).
         """
         c_p = self.c_p
         T = self.T
@@ -1527,19 +1672,24 @@ class MembraneReactor:
         dt_chem_min = np.min(dt_chem_local)
         return dt_chem_min
 
-    def _solve_step(self, c_old, T_old, dt) -> SegregatedSolveResult:
+    def _solve_step(
+        self,
+        c_old: NDArray[np.float64],
+        T_old: NDArray[np.float64],
+        dt: float,
+    ) -> SegregatedSolveResult:
         """Perform segregated Newton iterations for fixed reaction factor.
 
         This is the "corrector" part of the continuation scheme, solving
         the coupled concentration-pressure and temperature equations.
 
         Args:
-            c_old: Previous concentration field
-            T_old: Previous temperature field
-            dt: Time step
+            c_old: Previous concentration field (num_z, num_r, num_c).
+            T_old: Previous temperature field (num_z, num_r).
+            dt: Pseudo-time step size.
 
         Returns:
-            SegregatedSolveResult with convergence info
+            SegregatedSolveResult with convergence info.
         """
         g_norm_init = None
         g_p_norm_init = None
@@ -1597,11 +1747,24 @@ class MembraneReactor:
             g_p_norm_init=g_p_norm_init,
         )
 
-    def solve(self, num_timesteps=None, dt=None, **kwargs):
-        """
-        Solves the steady-state problem using an adaptive predictor-corrector
-        continuation method on the reaction rate scaling factor. This is the
-        recommended robust solver for difficult non-linear problems.
+    def solve(
+        self,
+        num_timesteps: Optional[int] = None,
+        dt: Optional[float] = None,
+        **kwargs: Any,
+    ) -> bool:
+        """Solve the steady-state reactor problem.
+
+        Uses adaptive time-stepping with predictor-corrector continuation on
+        the reaction rate scaling factor for robust convergence.
+
+        Args:
+            num_timesteps: Number of pseudo-transient steps. Defaults to config value.
+            dt: Pseudo-time step size. Defaults to config value.
+            **kwargs: Additional arguments passed to _solve_adaptive_dt.
+
+        Returns:
+            True if converged to steady state, False otherwise.
         """
         # --- Initialization ---
 
@@ -1619,10 +1782,20 @@ class MembraneReactor:
         return is_converged
 
     def _solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose=0):
-        """
-        Solves the steady-state problem using an adaptive predictor-corrector
-        continuation method on the reaction rate scaling factor. This is the
-        recommended robust solver for difficult non-linear problems.
+        """Solve using adaptive continuation on reaction rate scaling factor.
+
+        Uses predictor-corrector scheme with secant extrapolation. Step size
+        adapts based on Newton convergence: increases after success, decreases
+        after failure.
+
+        Args:
+            dt: Pseudo-time step size. Defaults to self.dt.
+            c_old: Previous concentration field for transient term.
+            T_old: Previous temperature field for transient term.
+            verbose: Verbosity level (0=quiet, 1=warnings, 2=progress).
+
+        Returns:
+            True if converged at factor_react=1.0, False otherwise.
         """
         # --- Initialization ---
         if dt is None:
@@ -1769,10 +1942,24 @@ class MembraneReactor:
         dt_factor_decrease=0.5,
         verbose=0,
     ):
-        """
-        Solves the steady-state problem using an adaptive predictor-corrector
-        continuation method on the reaction rate scaling factor. This is the
-        recommended robust solver for difficult non-linear problems.
+        """Solve using adaptive pseudo-time stepping.
+
+        Integrates from t=0 to t=dt using adaptive step sizes. Step size
+        increases after successful convergence and decreases after failure.
+
+        Args:
+            dt: Target pseudo-time to integrate to (final time).
+            c_old: Previous concentration field for transient term.
+            T_old: Previous temperature field for transient term.
+            dt_init: Initial step size. Defaults to min of chemical timescale and dt.
+            dt_min: Minimum step size before giving up. Defaults to 0.2*dt_chem.
+            dt_max: Maximum step size. Defaults to dt.
+            dt_factor_increase: Step size multiplier after success (default 1.2).
+            dt_factor_decrease: Step size multiplier after failure (default 0.5).
+            verbose: Verbosity level (0=quiet, 1=warnings, 2=progress).
+
+        Returns:
+            True if converged, False otherwise.
         """
         # --- Initialization ---
         dt_chem = None
