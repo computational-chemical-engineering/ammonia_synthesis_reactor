@@ -145,7 +145,11 @@ def newton_solve(
         config = NewtonConfig()
 
     if norm_fn is None:
-        norm_fn = lambda g: np.linalg.norm(g.ravel(), ord=config.ord_norm)
+
+        def default_norm(g: NDArray) -> float:
+            return np.linalg.norm(g.ravel(), ord=config.ord_norm)
+
+        norm_fn = default_norm
 
     x = x0.ravel()
     x_shape = x0.shape

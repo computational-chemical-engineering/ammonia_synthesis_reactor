@@ -5,11 +5,19 @@ Handles grid generation and provides helpers for accessing region-specific data.
 """
 
 from typing import Tuple
+
 import numpy as np
 from numpy.typing import NDArray
 
-from pymrm import non_uniform_grid
 from config import ReactorConfig
+from pymrm import non_uniform_grid
+
+# Grid refinement constants for non-uniform spacing
+# These control the initial cell size relative to uniform spacing
+GRID_REFINEMENT_OFFSET_RADIAL = 10  # Subtract from num_points for radial spacing
+GRID_REFINEMENT_OFFSET_AXIAL = 8  # Subtract from num_points for axial spacing
+GRID_REFINEMENT_MIN_FACTOR = 0.8  # Minimum factor of num_points for spacing calc
+GRID_STRETCH_RATIO = 1.2  # Geometric stretch ratio for non-uniform grids
 
 
 class ReactorMesh:
@@ -55,23 +63,25 @@ class ReactorMesh:
 
         # Retentate radial grid (outer region)
         dr_ret = (config.r_max - config.r_min) / max(
-            self.num_r_ret - 10, 0.8 * self.num_r_ret
+            self.num_r_ret - GRID_REFINEMENT_OFFSET_RADIAL,
+            GRID_REFINEMENT_MIN_FACTOR * self.num_r_ret,
         )
         self.r_f_ret = non_uniform_grid(
-            config.r_min, config.r_max, self.num_r_ret + 1, dr_ret, 1.2
+            config.r_min, config.r_max, self.num_r_ret + 1, dr_ret, GRID_STRETCH_RATIO
         )
         self.r_c_ret = 0.5 * (self.r_f_ret[:-1] + self.r_f_ret[1:])
 
         # Permeate radial grid (inner region)
         dr_perm = (config.r_max_perm - config.r_min_perm) / max(
-            self.num_r_perm - 10, 0.8 * self.num_r_perm
+            self.num_r_perm - GRID_REFINEMENT_OFFSET_RADIAL,
+            GRID_REFINEMENT_MIN_FACTOR * self.num_r_perm,
         )
         self.r_f_perm = non_uniform_grid(
             config.r_min_perm,
             config.r_max_perm,
             self.num_r_perm + 1,
             dr_perm,
-            1.0 / 1.2,
+            1.0 / GRID_STRETCH_RATIO,
         )
         self.r_c_perm = 0.5 * (self.r_f_perm[:-1] + self.r_f_perm[1:])
 
@@ -79,14 +89,15 @@ class ReactorMesh:
         num_z_sealing = int(np.round(config.Lsealing / config.L * config.num_z))
         z_f_uniform = np.linspace(0, config.Lsealing, num_z_sealing + 1)
         dz_nonuniform = (config.L - config.Lsealing) / max(
-            config.num_z - num_z_sealing - 8, 0.8 * (config.num_z - num_z_sealing)
+            config.num_z - num_z_sealing - GRID_REFINEMENT_OFFSET_AXIAL,
+            GRID_REFINEMENT_MIN_FACTOR * (config.num_z - num_z_sealing),
         )
         z_f_non_uniform = non_uniform_grid(
             config.Lsealing,
             config.L,
             config.num_z + 1 - num_z_sealing,
             dz_nonuniform,
-            1.2,
+            GRID_STRETCH_RATIO,
         )
         self.z_f = np.concatenate((z_f_uniform, z_f_non_uniform[1:]), axis=0)
         self.z_c = 0.5 * (self.z_f[:-1] + self.z_f[1:])
