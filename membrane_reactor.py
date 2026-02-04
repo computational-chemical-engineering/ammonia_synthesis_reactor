@@ -158,7 +158,7 @@ class MembraneReactor:
         self.factor_norm_p = (self.c_p[..., -1].size) ** (-1.0 / self.ord_norm)
 
         dt_cfl = self._compute_dt_cfl(cfl=CFL_INIT)
-        self.solve(num_timesteps=2, dt=dt_cfl)
+        self.solve(dt=dt_cfl, use_adaptive_react=False, num_timesteps=2)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to config and mesh for backwards compatibility.
@@ -1773,6 +1773,7 @@ class MembraneReactor:
         self,
         num_timesteps: Optional[int] = None,
         dt: Optional[float] = None,
+        use_adaptive_react: bool = True,
         **kwargs: Any,
     ) -> bool:
         """Solve the steady-state reactor problem.
@@ -1783,7 +1784,8 @@ class MembraneReactor:
         Args:
             num_timesteps: Number of pseudo-transient steps. Defaults to config value.
             dt: Pseudo-time step size. Defaults to config value.
-            **kwargs: Additional arguments passed to _solve_adaptive_dt.
+            use_adaptive_react: If True, use adaptive continuation on reaction rate.
+            **kwargs: Additional arguments passed to adaptive solve methods.
 
         Returns:
             True if converged to steady state, False otherwise.
@@ -1800,7 +1802,10 @@ class MembraneReactor:
         for i in range(num_timesteps):
             T_old = self.T.copy()
             c_old = self.c_p[..., :-1].copy()
-            is_converged = self._solve_adaptive_dt(dt, c_old, T_old, **kwargs)
+            if use_adaptive_react:
+                is_converged = self._solve_adaptive_react(dt, c_old, T_old, **kwargs)
+            else:
+                is_converged = self._solve_adaptive_dt(dt, c_old, T_old, **kwargs)
         return is_converged
 
     def _solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose=0):
