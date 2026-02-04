@@ -101,11 +101,20 @@ require restructuring the operator setup in `_init_jac()`.
 - Membrane species permeabilities
 - Inlet flux profiles (parabolic, uniform)
 
-### Phase 3: Solver Abstraction ⏳ PENDING
-- Generalize Newton solver: Extract logic from `_solve_c_p` into a standalone `NewtonSolver`.
-	- Accept `residual_fn`, `jacobian_fn`, and `initial_guess`.
-	- Implement Armijo line-search and convergence monitoring as generic features.
-- Generalize continuation: Move adaptive reaction factor (`_solve_adaptive_react`) and adaptive time-stepping (`_solve_adaptive_dt`) into a `ContinuationManager`.
+### Phase 3: Solver Abstraction 🔄 IN PROGRESS
+
+**Completed**:
+- `dba06a2`: Created `solvers.py` with generic numerical infrastructure
+  - `NewtonConfig` / `NewtonResult` dataclasses for solver I/O
+  - `armijo_line_search()` backtracking line search
+  - `newton_solve()` generic Newton-Raphson with optional line search
+  - `ContinuationConfig` / `ContinuationState` for continuation parameters
+  - `continuation_solve()` adaptive predictor-corrector with secant extrapolation
+
+**Remaining work**:
+1. Wire `newton_solve()` into `_solve_c_p()` and `_solve_T()`
+2. Wire `continuation_solve()` into `_solve_adaptive_react()`
+3. (Optional) Refactor `_solve_adaptive_dt()` to use continuation framework
 
 ### Phase 4: Modernization ⏳ PENDING
 - Type hinting: Apply `numpy.typing.NDArray` to numerical inputs.
@@ -182,20 +191,19 @@ Each phase introduces new modules while the old class continues to pass regressi
 
 **Last updated**: 2026-02-04
 **Branch**: `feat/monolithic`
-**Latest commit**: `9e02ec6` (Phase 2 - inlet flux extraction)
+**Latest commit**: `dba06a2` (Phase 3 - solvers.py)
 
 | Phase | Status | Commit |
 |-------|--------|--------|
 | Phase 0: Regression Test | ✅ Complete | `d9e1027` |
 | Phase 1: Config & Mesh | ✅ Complete | `2261218` |
 | Phase 2: Physics Decoupling | ✅ Complete | `9e02ec6` |
-| Phase 3: Solver Abstraction | ⏳ Pending | — |
+| Phase 3: Solver Abstraction | 🔄 In Progress | `dba06a2` |
 | Phase 4: Modernization | ⏳ Pending | — |
 
 ## Next Steps
-1. **Phase 3**: Extract solver logic to solvers.py
-   - Newton iteration from `_solve_c_p()` and `_solve_T()`
-   - Armijo line search logic
-   - Continuation strategies (`_solve_adaptive_react`, `_solve_adaptive_dt`)
+1. **Continue Phase 3**: Wire solvers.py into membrane_reactor.py
+   - Replace inline Newton iteration with `newton_solve()`
+   - Replace inline continuation with `continuation_solve()`
 
 2. Run regression test after each change: `.venv/bin/python regression_test.py --test`
