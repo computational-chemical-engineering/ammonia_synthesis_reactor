@@ -80,15 +80,26 @@ config_file = 'debug.json'
   - Documented ERGUN and permeability constants
   - Refactored `_construct_darcy_matrices()` to use new functions
 - `84e27f0`: Cleanup - consolidated all physics constants in physics.py
+- `aa70e99`: Extracted membrane permeability calculation
+  - `compute_membrane_permeabilities()` from NH3 permeability and selectivity ratios
+  - Handles sealing region (zero permeability for z <= Lsealing)
+- `9e02ec6`: Extracted inlet flux calculations
+  - `compute_inlet_flux_permeate()` for parabolic velocity profile
+  - `compute_inlet_flux_retentate()` for uniform annular profile
 
 **Note**: The stateless `assemble_*_residual()` functions cannot be directly wired in
 because the divergence operators output to monolithic arrays. A full extraction would
 require restructuring the operator setup in `_init_jac()`.
 
 **Remaining work**:
-1. Extract membrane permeation logic from `_construct_g_diff()` to physics.py
-2. Extract reaction source computation to physics.py (already in separate AmmoniaSynthesisKinetics class)
-3. (Optional) Restructure operators to enable full physics function integration
+1. (Optional) Extract membrane flux matrix assembly from `_construct_g_diff()`
+2. (Optional) Restructure operators to enable full physics function integration
+
+**Phase 2 Summary**: Core physics calculations have been extracted to physics.py:
+- Boundary condition helpers
+- Flow permeability (Hagen-Poiseuille, Ergun)
+- Membrane species permeabilities
+- Inlet flux profiles (parabolic, uniform)
 
 ### Phase 3: Solver Abstraction ⏳ PENDING
 - Generalize Newton solver: Extract logic from `_solve_c_p` into a standalone `NewtonSolver`.
@@ -169,28 +180,22 @@ Each phase introduces new modules while the old class continues to pass regressi
 
 ## Current Status
 
-**Last updated**: 2026-02-03
+**Last updated**: 2026-02-04
 **Branch**: `feat/monolithic`
-**Latest commit**: `84e27f0` (Phase 2 - constants cleanup)
+**Latest commit**: `9e02ec6` (Phase 2 - inlet flux extraction)
 
 | Phase | Status | Commit |
 |-------|--------|--------|
 | Phase 0: Regression Test | ✅ Complete | `d9e1027` |
 | Phase 1: Config & Mesh | ✅ Complete | `2261218` |
-| Phase 2: Physics Decoupling | 🔄 In Progress | `84e27f0` |
+| Phase 2: Physics Decoupling | ✅ Complete | `9e02ec6` |
 | Phase 3: Solver Abstraction | ⏳ Pending | — |
 | Phase 4: Modernization | ⏳ Pending | — |
 
 ## Next Steps
-1. **Continue Phase 2**: Extract remaining physics to physics.py
-   - Membrane permeation flux calculation from `_construct_g_diff()`
-   - (Note: Full residual assembly extraction blocked by monolithic operator design)
-
-2. **Prepare for Phase 3**: Identify solver-specific code in membrane_reactor.py
-   - Newton iteration in `_solve_c_p()` and `_solve_T()`
+1. **Phase 3**: Extract solver logic to solvers.py
+   - Newton iteration from `_solve_c_p()` and `_solve_T()`
    - Armijo line search logic
    - Continuation strategies (`_solve_adaptive_react`, `_solve_adaptive_dt`)
 
-3. Run regression test after each change: `.venv/bin/python regression_test.py --test`
-
-4. Once Phase 2 complete, proceed to Phase 3 (solver extraction)
+2. Run regression test after each change: `.venv/bin/python regression_test.py --test`
