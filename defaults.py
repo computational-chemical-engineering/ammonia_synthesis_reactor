@@ -1,7 +1,5 @@
 # defaults.py
 
-import numpy as np
-import math
 import scipy.constants as const
 
 DEFAULTS = {
@@ -11,7 +9,7 @@ DEFAULTS = {
 
     # Grid settings
     "dim": 2,  # Number of dimensions
-    "num_r": 50,  # Number of radial grid points
+    "num_r": 30,  # Number of radial grid points
     "num_z": 100,  # Number of axial grid points
 
     # Physical constants
@@ -33,7 +31,7 @@ DEFAULTS = {
     "Sel_am_ni": 1000.0,  # Selectivity NH3/N2
     "Nu_ret": (lambda Re, Pr: 0.017 * Re**0.79), # Nusselt correlation retentate side
     "Nu_perm": (lambda Re, Pr: 0.023*Re**0.8 * Pr**0.4), # Nusselt correlation permeate side
-    "lambda_mem": 16.0, # Thermal conductivity membrane    
+    "lambda_mem": 16.0, # Thermal conductivity membrane
 
     # Reactor properties
     "Nm": 1,  # Number of membranes
@@ -41,16 +39,16 @@ DEFAULTS = {
     "Dcat": 1.0/3.0,  # Catalyst dilution factor (with inerts like SiC)
     "rho_c": 590.0,  # Catalyst density [kg/m³ catalyst]
     "dp": 2.5e-4,  # Catalyst particle diameter [m]
-    
+
     # Solver settings
-    "dt": 1e8,  # Time step size
-    "num_timesteps": 1,  # Number of time steps
-    "num_newton_iterations": 100,  # Maximum number of outer iterations
-    "num_pressure_iterations": 2,  # Maximum number of inner iterations in pressure solver
+    "dt": 1e6,  # Time step size
+    "num_timesteps": 10,  # Number of time steps / outer iterations
+    "num_newton_iterations": 10,  # Maximum number of outer iterations
+    "num_pressure_iterations": 5,  # Maximum number of inner iterations in pressure solver
     "num_concentration_iterations": 1,  # Maximum number of inner iterations in concentration solver
-    "rtol": 1e-4,  # Convergence relative tolerance for Newton's method
+    "rtol": 1e-6,  # Convergence relative tolerance for Newton's method
     "atol": 0.0,  # Convergence absolute tolerance for Newton's method
-    "rtol_p": 0.0,  # Relative tolerance for pressure convergence
+    "rtol_p": 1e-6,  # Relative tolerance for pressure convergence
     "atol_p": 0.0,  # Absolute tolerance for pressure convergence
     "rtol_c": 0.0,  # Relative tolerance for concentration convergence
     "atol_c": 0.0,  # Absolute tolerance for concentration convergence
@@ -58,17 +56,22 @@ DEFAULTS = {
 
     # factor_react is the continuation factor for the reaction rate
     # This factor is adaptively cocntrolled
+    "newton_conv_rate_min": 3.0,
     "factor_react": 1.0,  # Reaction rate factor
-    
+    "dfactor_react_init": 1e-2,  # Initial reaction rate factor increment
+    "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
+    "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
+    "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react
+    "factor_p": 1.0,
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
     "F_perm_in": 0.02, # Inlet molar flow rate [mol/s]
     "is_counter_current": False,  # Counter-current flow if True, co-current if False
-    
+
     # Pressure settings
     "p_ret_out": 29.83e5, # Retentate side outlet pressure [Pa]
     "p_perm_out": 1e5,    # Permeate side outlet pressure [Pa]
-    
+
     # Temperature and pressure settings
     "is_isothermal": False,  # If True, the reactor is isothermal
     "T_ret_in": 273 + 380.0,  # Inlet temperature [K]

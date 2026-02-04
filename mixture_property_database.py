@@ -1,6 +1,11 @@
 import json
+import logging
 import pandas as pd
 import numpy as np
+
+# Module-level logger
+logger = logging.getLogger(__name__)
+
 
 class MixturePropertyDatabase:
     """
@@ -136,7 +141,9 @@ class MixturePropertyDatabase:
         # Find missing columns
         missing_cols = [col for col in expected_columns if col not in properties]
         if missing_cols:
-            print(f"⚠️ Warning: Missing properties {missing_cols} for {species} in {df_name}")
+            logger.warning(
+                "Missing properties %s for %s in %s", missing_cols, species, df_name
+            )
 
         # Add or update the row
         self.dataframes[df_name] = df.combine_first(new_entry)
@@ -170,15 +177,21 @@ class MixturePropertyDatabase:
 
         for entry in df.index:
             species_entry = entry.split("/")
-            if (len(species_entry)>1):
+            if len(species_entry) > 1:
                 reversed_label = "/".join(reversed(species_entry))
-                found_reversed_label = (reversed_label in df.index)
+                found_reversed_label = reversed_label in df.index
                 for prop in df.columns:
                     if not pd.isna(df.at[entry, prop]):
-                        count_species[prop] = max(count_species[prop],len(species_entry))
-                        if found_reversed_label and not pd.isna(df.at[reversed_label, prop]):
-                            symmetric_properties[prop] = False  # Found asymmetric property
-                     
+                        count_species[prop] = max(
+                            count_species[prop], len(species_entry)
+                        )
+                        if found_reversed_label and not pd.isna(
+                            df.at[reversed_label, prop]
+                        ):
+                            symmetric_properties[prop] = (
+                                False  # Found asymmetric property
+                            )
+
         # Initialize arrays for properties
         for prop in df.columns:
             shape = (num_species,) * count_species[prop]
@@ -187,7 +200,9 @@ class MixturePropertyDatabase:
         # Process each row in the DataFrame
         for entry, row in df.iterrows():
             species_entry = entry.split("/")
-            species_indices = [species_list.index(s) for s in species_entry if s in species_list]
+            species_indices = [
+                species_list.index(s) for s in species_entry if s in species_list
+            ]
 
             if len(species_indices) != len(species_entry):
                 continue  # Skip if some species are missing
