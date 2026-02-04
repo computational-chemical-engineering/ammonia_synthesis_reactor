@@ -24,16 +24,24 @@ from physics import (
     HAGEN_POISEUILLE_COEFF, PERM_RAD_FACTOR,
 )
 import defaults  # Import the defaults module (still needed for reload)
+from solvers import NewtonConfig, ContinuationConfig
 
 # =============================================================================
 # Numerical solver constants
 # =============================================================================
 
+# Default solver configurations (can be overridden per-instance)
+DEFAULT_NEWTON_CONFIG = NewtonConfig()
+DEFAULT_CONTINUATION_CONFIG = ContinuationConfig()
+
+# Physical timestep constraints
 CFL_INIT = 0.1                # Initial CFL number for timestep selection
 EPS_CHEM_TIMESTEP = 1e-8      # Small epsilon for chemical timestep calculation
 MAX_DT_PER_STEP = 500.0       # Maximum temperature change per solve step [K]
-ARMIJO_COEFF = 1e-4           # Armijo sufficient decrease condition
-MIN_LINE_SEARCH_ALPHA = 1e-3  # Minimum step size before line search fails
+
+# Line search parameters (from NewtonConfig defaults)
+ARMIJO_COEFF = DEFAULT_NEWTON_CONFIG.armijo_coeff
+MIN_LINE_SEARCH_ALPHA = DEFAULT_NEWTON_CONFIG.min_line_search_alpha
 
 class TestKinetics:
     def __init__(self, T=None, p=None):
