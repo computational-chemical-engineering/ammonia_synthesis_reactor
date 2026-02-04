@@ -24,7 +24,7 @@ from physics import (
     HAGEN_POISEUILLE_COEFF, PERM_RAD_FACTOR,
 )
 import defaults  # Import the defaults module (still needed for reload)
-from solvers import NewtonConfig, ContinuationConfig
+from solvers import NewtonConfig, NewtonResult, ContinuationConfig, armijo_line_search
 
 # =============================================================================
 # Numerical solver constants
@@ -932,56 +932,100 @@ class MembraneReactor:
         self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:])
         return success
 
-    def _solve_c_p(self, c_old, T_old, dt, verbose = 0):
+    def _solve_c_p(self, c_old, T_old, dt, verbose=0, use_line_search=False):
         """Newton/line-search solve for species concentrations.
 
+        Args:
+            c_old: Previous concentration field
+            T_old: Previous temperature field
+            dt: Time step
+            verbose: Verbosity level
+            use_line_search: If True, use Armijo backtracking line search
+
         Returns:
-            tuple: (y, c_tot, g_norm, success_flag)
+            tuple: (g_norm, g_norm_init, g_p_norm, g_p_norm_init, success)
         """
         success = True
         c_p = self.c_p
-        c = c_p[...,:-1]
-        p = c_p[...,-1]
-        T = self.T
+        c_p_shape = c_p.shape
         ord = self.ord_norm
         factor_norm_c = self.factor_norm_c
         factor_norm_p = self.factor_norm_p
         c_p_vec = c_p.ravel()
+
+        # Define norm function for combined concentration + pressure residual
+        def compute_norms(g):
+            g_c = np.linalg.norm(g[..., :-1].ravel(), ord=ord) * factor_norm_c
+            g_p = np.linalg.norm(g[..., -1].ravel(), ord=ord) * factor_norm_p
+            return g_c, g_p
+
+        # Wrapper for residual evaluation with side effects
+        def eval_residual(x_vec):
+            c_p_vec[:] = x_vec
+            self._update_velocity_fields(p=c_p[..., -1])
+            g, _ = self._construct_g_c_p(c_old, T_old, dt, compute_jac=False)
+            return g
+
+        g_norm_init = None
+        g_p_norm_init = None
+
         for k in range(self.num_concentration_iterations):
-            self._construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])
-            g, jac= self._construct_g_c_p(c_old, T_old, dt, compute_jac=True)
-            g_norm = np.linalg.norm(g[...,:-1].ravel(), ord=ord) * factor_norm_c
-            g_p_norm = np.linalg.norm(g[...,-1].ravel(), ord=ord) * factor_norm_p
-            if k==0:
+            # Update Darcy matrices and compute residual + Jacobian
+            self._construct_darcy_matrices(c=c_p[..., :-1], p=c_p[..., -1])
+            g, jac = self._construct_g_c_p(c_old, T_old, dt, compute_jac=True)
+            g_norm, g_p_norm = compute_norms(g)
+
+            if k == 0:
                 g_norm_init = g_norm
                 g_p_norm_init = g_p_norm
-            dc_p = -sla.spsolve(jac, g.reshape((-1,1)))
+
+            # Compute Newton step
+            dc_p = -sla.spsolve(jac, g.reshape((-1, 1)))
             self.cnt_num_solves_c_p += 1
-            c_p_prev = c_p_vec.copy()
-            g_norm_prev = g_norm
-            g_p_norm_prev = g_p_norm
-            alpha = 1.0
-            while True:
-                c_p_vec[...] = c_p_prev + alpha*dc_p
-                #self._construct_darcy_matrices(c=c_p[...,:-1], p=c_p[...,-1])          
-                self._update_velocity_fields(p=c_p[...,-1])
-                compute_jac = (k < self.num_concentration_iterations - 1)
-                g, _ = self._construct_g_c_p(c_old, T_old, dt, compute_jac=False)
-                g_norm = np.linalg.norm(g[...,:-1].ravel(), ord=ord) * factor_norm_c
-                g_p_norm = np.linalg.norm(g[...,-1].ravel(), ord=ord)* factor_norm_p
-                break
-                if (g_norm < (1.0-ARMIJO_COEFF*alpha)*g_norm_prev and g_p_norm < (1.0-ARMIJO_COEFF*alpha)*g_p_norm_prev) or (not success):
-                    break
-                alpha *= 0.5
-                if (alpha < MIN_LINE_SEARCH_ALPHA):
-                    alpha = 0.0
+
+            # Apply step with optional line search
+            if use_line_search:
+                # Use armijo_line_search from solvers.py
+                def norm_fn(g_arr):
+                    g_c, g_p = compute_norms(g_arr.reshape(c_p_shape))
+                    return max(g_c, g_p)  # Combined norm for line search
+
+                x_new, g_new_norm, alpha, ls_success = armijo_line_search(
+                    x=c_p_vec.copy(),
+                    dx=dc_p,
+                    g_norm=max(g_norm, g_p_norm),
+                    residual_fn=lambda x: eval_residual(x).ravel(),
+                    norm_fn=norm_fn,
+                    armijo_coeff=ARMIJO_COEFF,
+                    min_alpha=MIN_LINE_SEARCH_ALPHA,
+                )
+                c_p_vec[:] = x_new
+
+                if not ls_success:
                     success = False
                     if verbose > 0:
-                        warnings.warn(f"Line search failed to improve residual for concentration solver: {g_norm} > {g_norm_prev}", RuntimeWarning)
-                    #raise RuntimeWarning(f"Line search failed to improve residual: {g_norm} > {g_norm_prev}")
-            if (g_norm < np.maximum(self.rtol_c * g_norm_init, self.atol_c) and g_p_norm < np.maximum(self.rtol_p * g_p_norm_init, self.atol_p)):
+                        warnings.warn(
+                            f"Line search failed at iteration {k}: "
+                            f"residual {g_new_norm:.2e}",
+                            RuntimeWarning
+                        )
+            else:
+                # Full Newton step (no line search)
+                c_p_vec[:] = c_p_vec + dc_p
+
+            # Update velocity fields after step
+            self._update_velocity_fields(p=c_p[..., -1])
+
+            # Recompute residual norms for convergence check
+            g, _ = self._construct_g_c_p(c_old, T_old, dt, compute_jac=False)
+            g_norm, g_p_norm = compute_norms(g)
+
+            # Check convergence
+            if (g_norm < max(self.rtol_c * g_norm_init, self.atol_c) and
+                    g_p_norm < max(self.rtol_p * g_p_norm_init, self.atol_p)):
                 break
-        return g_norm, g_norm_init, g_p_norm, g_p_norm_init,success 
+
+        return g_norm, g_norm_init, g_p_norm, g_p_norm_init, success 
 
     def _compute_dt_cfl(self, cfl = CFL_INIT):
         """Return minimum time step avoiding CFL condition violation."""
