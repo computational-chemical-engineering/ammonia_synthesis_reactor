@@ -18,6 +18,7 @@ from physics import (
     make_dirichlet_bc, get_axial_bcs_for_flow,
     assemble_convection_residual,
     compute_permeate_permeability, compute_packed_bed_permeability,
+    compute_membrane_permeabilities,
     ERGUN_VISCOUS_COEFF, ERGUN_INERTIAL_COEFF,
     HAGEN_POISEUILLE_COEFF, PERM_RAD_FACTOR,
 )
@@ -161,16 +162,14 @@ class MembraneReactor:
         self.z_c = self._mesh.z_c
 
         # membrane permeabilities
-        perm_dict= {'NH3': self.Perm_NH3, 'H2': self.Perm_NH3 / self.Sel_am_hy, 'N2': self.Perm_NH3 / self.Sel_am_ni}
-        perm = np.zeros((1, self.num_c))
-        for i, species in enumerate(self.species):
-            perm[0, i] = perm_dict[species]
-        perm = np.broadcast_to(perm, (self.num_z, self.num_c))
-        fltr = (self.z_c <= self.Lsealing) 
-        if (any(fltr)):
-            perm = perm.copy()
-            perm[fltr,:] = 0
-        self.perm = perm
+        self.perm = compute_membrane_permeabilities(
+            species=self.species,
+            Perm_NH3=self.Perm_NH3,
+            Sel_am_hy=self.Sel_am_hy,
+            Sel_am_ni=self.Sel_am_ni,
+            z_c=self.z_c,
+            Lsealing=self.Lsealing,
+        )
 
         # reactor geometry
         #self.Pm = np.pi * self.r_min  # Membrane circumference [m]

@@ -369,3 +369,58 @@ def compute_packed_bed_permeability(
     beta_1 = ERGUN_INERTIAL_COEFF * density * one_minus_eps * u_abs / (eps3 * dp)
 
     return 1.0 / (beta_0 + beta_1)
+
+
+# =============================================================================
+# Membrane permeation
+# =============================================================================
+
+def compute_membrane_permeabilities(
+    species: list,
+    Perm_NH3: float,
+    Sel_am_hy: float,
+    Sel_am_ni: float,
+    z_c: NDArray,
+    Lsealing: float,
+) -> NDArray:
+    """Compute membrane permeabilities for each species.
+
+    Permeability is based on NH3 reference permeability and selectivity ratios.
+    The sealing region (z <= Lsealing) has zero permeability.
+
+    Args:
+        species: List of species names (must include 'NH3', 'H2', 'N2')
+        Perm_NH3: Base NH3 permeability [mol/(m².s.Pa)]
+        Sel_am_hy: NH3/H2 selectivity ratio (Perm_NH3 / Perm_H2)
+        Sel_am_ni: NH3/N2 selectivity ratio (Perm_NH3 / Perm_N2)
+        z_c: Axial cell centers, shape (num_z,)
+        Lsealing: Length of sealing region where permeability is zero
+
+    Returns:
+        Permeability array of shape (num_z, num_species)
+    """
+    num_z = len(z_c)
+    num_c = len(species)
+
+    # Build permeability dict from selectivity ratios
+    perm_dict = {
+        'NH3': Perm_NH3,
+        'H2': Perm_NH3 / Sel_am_hy,
+        'N2': Perm_NH3 / Sel_am_ni,
+    }
+
+    # Create permeability array
+    perm = np.zeros((1, num_c))
+    for i, sp in enumerate(species):
+        perm[0, i] = perm_dict.get(sp, 0.0)
+
+    # Broadcast to full grid
+    perm = np.broadcast_to(perm, (num_z, num_c))
+
+    # Zero out permeability in sealing region
+    sealing_mask = z_c <= Lsealing
+    if np.any(sealing_mask):
+        perm = perm.copy()
+        perm[sealing_mask, :] = 0.0
+
+    return perm
