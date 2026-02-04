@@ -27,6 +27,38 @@ import defaults  # Import the defaults module (still needed for reload)
 from solvers import NewtonConfig, NewtonResult, ContinuationConfig, armijo_line_search
 
 # =============================================================================
+# Solver result types
+# =============================================================================
+
+from dataclasses import dataclass
+
+@dataclass
+class SegregatedSolveResult:
+    """Result from segregated concentration-pressure Newton solve."""
+    converged: bool
+    num_iterations: int
+    g_norm: float           # Concentration residual norm
+    g_p_norm: float         # Pressure residual norm
+    g_norm_init: float      # Initial concentration residual
+    g_p_norm_init: float    # Initial pressure residual
+
+    @property
+    def convergence_factor(self) -> float:
+        """Concentration convergence factor."""
+        return self.g_norm / self.g_norm_init if self.g_norm_init > 0 else 0.0
+
+    @property
+    def convergence_factor_p(self) -> float:
+        """Pressure convergence factor."""
+        return self.g_p_norm / self.g_p_norm_init if self.g_p_norm_init > 0 else 0.0
+
+    def as_tuple(self):
+        """Return legacy tuple format for backwards compatibility."""
+        return (self.num_iterations, self.g_norm, self.g_p_norm,
+                self.converged, self.convergence_factor, self.convergence_factor_p)
+
+
+# =============================================================================
 # Numerical solver constants
 # =============================================================================
 
@@ -1048,37 +1080,73 @@ class MembraneReactor:
         dt_chem_min = np.min(dt_chem_local)
         return dt_chem_min
 
-    def _solve_step(self, c_old, T_old, dt):
-        """
-        Helper method: Performs segregated Newton iterations for a fixed `self.factor_react`.
-        This is the "corrector" part of the continuation scheme.
-        
+    def _solve_step(self, c_old, T_old, dt) -> SegregatedSolveResult:
+        """Perform segregated Newton iterations for fixed reaction factor.
+
+        This is the "corrector" part of the continuation scheme, solving
+        the coupled concentration-pressure and temperature equations.
+
+        Args:
+            c_old: Previous concentration field
+            T_old: Previous temperature field
+            dt: Time step
+
         Returns:
-            num_iterations (int): The number of outer Newton iterations taken.
-            success (bool): True if the solution converged within tolerances, False otherwise.
+            SegregatedSolveResult with convergence info
         """
+        g_norm_init = None
+        g_p_norm_init = None
+        success = True
+
         for j in range(self.num_newton_iterations):
-            # --- Segregated Solves ---
+            # Solve concentration-pressure system
             g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = self._solve_c_p(c_old, T_old, dt)
-            self.kinetics.set_T_and_p(p=self.c_p[:,self.num_r_perm:,-1])
+            self.kinetics.set_T_and_p(p=self.c_p[:, self.num_r_perm:, -1])
             print(f"j: {j}, g_norm: {g_norm}")
+
             if j == 0:
                 g_norm_init = g_norm_start
                 g_p_norm_init = g_p_norm_start
 
+            # Solve temperature (if non-isothermal)
             success_T = True
             if not self.is_isothermal:
                 success_T = self._solve_T(T_old, dt)
-                self.kinetics.set_T_and_p(T=self.T[:,self.num_r_perm:])
-                
-            if (g_norm > 10*g_norm_init or g_p_norm > 10*g_p_norm_init):
-                return j+1, g_norm, g_p_norm, False, g_norm/g_norm_init, g_p_norm/g_p_norm_init
+                self.kinetics.set_T_and_p(T=self.T[:, self.num_r_perm:])
+
+            # Check for divergence
+            if g_norm > 10 * g_norm_init or g_p_norm > 10 * g_p_norm_init:
+                return SegregatedSolveResult(
+                    converged=False,
+                    num_iterations=j + 1,
+                    g_norm=g_norm,
+                    g_p_norm=g_p_norm,
+                    g_norm_init=g_norm_init,
+                    g_p_norm_init=g_p_norm_init,
+                )
 
             success = success_c_p and success_T
-            if (g_norm < np.maximum(self.rtol * g_norm_init, self.atol)):
-                return j+1, g_norm, g_p_norm, success, g_norm/g_norm_init, g_p_norm/g_p_norm_init # Converged!
 
-        return self.num_newton_iterations, g_norm, g_p_norm, success, g_norm/g_norm_init, g_p_norm/g_p_norm_init # Failed to converge within max iterations
+            # Check convergence
+            if g_norm < max(self.rtol * g_norm_init, self.atol):
+                return SegregatedSolveResult(
+                    converged=success,
+                    num_iterations=j + 1,
+                    g_norm=g_norm,
+                    g_p_norm=g_p_norm,
+                    g_norm_init=g_norm_init,
+                    g_p_norm_init=g_p_norm_init,
+                )
+
+        # Max iterations reached - return last success status
+        return SegregatedSolveResult(
+            converged=success,  # Original code returned success, not False
+            num_iterations=self.num_newton_iterations,
+            g_norm=g_norm,
+            g_p_norm=g_p_norm,
+            g_norm_init=g_norm_init,
+            g_p_norm_init=g_p_norm_init,
+        )
 
     def solve(self, num_timesteps=None, dt=None, **kwargs):
         """
@@ -1157,7 +1225,11 @@ class MembraneReactor:
             # --- Corrector Step ---
             if verbose > 1:
                 print(f"Attempting factor_react = {self.factor_react:.4f} (step size = {dfactor_react:.4f})...")
-            num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
+            result = self._solve_step(c_old, T_old, dt)
+            num_iters = result.num_iterations
+            g_norm, g_p_norm = result.g_norm, result.g_p_norm
+            is_converged = result.converged
+            conv_factor, conv_factor_p = result.convergence_factor, result.convergence_factor_p
             is_converging = (conv_factor < conv_factor_min) or is_converged
             if is_converged and self.factor_react == factor_react_max:
                 break
@@ -1230,8 +1302,11 @@ class MembraneReactor:
         is_converged = False
         while t < t_final or not is_converged:
             try:
-                num_iters, g_norm, g_p_norm, is_converged, conv_factor, conv_factor_p = self._solve_step(c_old, T_old, dt)
-                #is_converging = (conv_factor < conv_factor_min) or is_converged
+                result = self._solve_step(c_old, T_old, dt)
+                num_iters = result.num_iterations
+                g_norm, g_p_norm = result.g_norm, result.g_p_norm
+                is_converged = result.converged
+                conv_factor, conv_factor_p = result.convergence_factor, result.convergence_factor_p
                 is_converging = is_converged
             except Exception as e:
                 is_converging = False
