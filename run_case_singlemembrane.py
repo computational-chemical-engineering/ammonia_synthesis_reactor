@@ -145,7 +145,7 @@ def run_case_studies(csv_path="case_studies_singlemem.csv"):
                 y_ret_in=y_ret_in,
                 is_counter_current=is_counter_current
             )
-            reactor.solve()
+            reactor.solve(verbose=2, use_adaptive_react=False, dt_min=1e-2)
             # 5. Save Raw Data
             # Save configuration for reproducibility
             with open(os.path.join(out_dir, "config.json"), 'w') as f:
@@ -189,8 +189,8 @@ def run_case_studies(csv_path="case_studies_singlemem.csv"):
             NH3_yield = 3 *(F_NH3_perm_z + F_NH3_ret_z) / ( 2 * F_H2_in_tot)
 
             # Example: average H2 flux at membrane
-            J_H2 = flows_ret_mem[:, 0] / reactor.A_membrane 
-            J_H2_avg = float(np.mean(J_H2))
+            #J_H2 = flows_ret_mem[:, 0] / reactor.A_membrane 
+            J_H2_avg = float(flows_ret_mem[0]/A_membrane)
 
             # Example: maximum temperature rise
             DeltaT_max = float(np.max(reactor.T - reactor.T_ret_in))

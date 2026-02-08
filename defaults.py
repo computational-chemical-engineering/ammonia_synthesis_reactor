@@ -41,22 +41,21 @@ DEFAULTS = {
     "dp": 2.5e-4,  # Catalyst particle diameter [m]
 
     # Solver settings
-    "dt": 1e6,  # Time step size
-    "num_timesteps": 10,  # Number of time steps / outer iterations
+    "dt": 1e7,  # Time step size
+    "num_timesteps": 1,  # Number of time steps / outer iterations
     "num_newton_iterations": 10,  # Maximum number of outer iterations
-    "num_pressure_iterations": 5,  # Maximum number of inner iterations in pressure solver
-    "num_concentration_iterations": 1,  # Maximum number of inner iterations in concentration solver
+    "num_concentration_iterations": 4,  # Maximum number of inner iterations in concentration solver
     "rtol": 1e-6,  # Convergence relative tolerance for Newton's method
-    "atol": 0.0,  # Convergence absolute tolerance for Newton's method
+    "atol": 1e-4,  # Convergence absolute tolerance for Newton's method
     "rtol_p": 1e-6,  # Relative tolerance for pressure convergence
     "atol_p": 0.0,  # Absolute tolerance for pressure convergence
-    "rtol_c": 0.0,  # Relative tolerance for concentration convergence
-    "atol_c": 0.0,  # Absolute tolerance for concentration convergence
+    "rtol_c": 1e-6,  # Relative tolerance for concentration convergence
+    "atol_c": 1e-4,  # Absolute tolerance for concentration convergence
     "ord_norm": 2,  # Order of norm for convergence criteria
 
     # factor_react is the continuation factor for the reaction rate
     # This factor is adaptively cocntrolled
-    "newton_conv_rate_min": 3.0,
+    "newton_conv_rate_min": 1.0,
     "factor_react": 1.0,  # Reaction rate factor
     "dfactor_react_init": 1e-2,  # Initial reaction rate factor increment
     "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react

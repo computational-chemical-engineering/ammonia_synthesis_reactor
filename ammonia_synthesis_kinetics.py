@@ -1,6 +1,8 @@
 import numpy as np
 from scipy import constants
 
+C_SMALL = 1e-4  # Small concentration to avoid division by zero (mol/m^3)
+A_SMALL = 1e-4  # Small activity to avoid division by zero (bar)
 
 class AmmoniaSynthesisKinetics:
     """
@@ -20,8 +22,6 @@ class AmmoniaSynthesisKinetics:
         Universal gas constant in J/(mol·K).
     axis : int
         The axis corresponding to the species index.
-    c_small : float
-        A small constant to avoid division by zero.
     rho_b : float
         Bulk density.
     rho_c : float
@@ -45,7 +45,7 @@ class AmmoniaSynthesisKinetics:
 
     Methods:
     --------
-    __init__(self, species=["H2", "N2", "NH3"], T=None, p=None, rho_b=None, rho_c=None, axis=-1, c_small=1e0):
+    __init__(self, species=["H2", "N2", "NH3"], T=None, p=None, rho_b=None, rho_c=None, axis=-1):
         Initialize the class with species, temperature, pressure, and other parameters.
 
     pow(self, c, n):
@@ -77,8 +77,7 @@ class AmmoniaSynthesisKinetics:
         p=None,
         rho_b=None,
         rho_c=None,
-        axis=-1,
-        c_small=1e-6,
+        axis=-1
     ):
         """
         Initialize the class with species, temperature, pressure, and other parameters.
@@ -97,8 +96,6 @@ class AmmoniaSynthesisKinetics:
             Catalyst density. Defaults to None.
         axis : int, optional
             The axis corresponding to the species index. Defaults to -1.
-        c_small : float, optional
-            A small constant to avoid division by zero. Defaults to 1e-6.
         """
         self.rate_constant = None
         self.Rc = (
@@ -106,7 +103,6 @@ class AmmoniaSynthesisKinetics:
         )  # Universal gas constant in cal/(mol·K)
         self.Ra = constants.R
         self.axis = axis
-        self.c_small = c_small
         self.rho_b = rho_b
         self.rho_c = rho_c
         self.set_T_and_p(T, p)
@@ -134,7 +130,7 @@ class AmmoniaSynthesisKinetics:
         numpy.ndarray
             Resulting array after applying the power operation.
         """
-        return c * (np.abs(c) + self.c_small) ** (n - 1)
+        return c * (np.abs(c + C_SMALL) + C_SMALL) ** (n - 1)
 
     def set_T_and_p(self, T=None, p=None):
         """
@@ -301,10 +297,10 @@ class AmmoniaSynthesisKinetics:
             * (
                 self.pow(a_N2, 0.5)
                 * self.pow(a_H2, 0.375)
-                / (self.c_small + np.maximum(a_NH3, 0.0)) ** 0.25
+                / (A_SMALL + np.maximum(a_NH3, 0.0)) ** 0.25
                 - (1.0 / self.K_eq)
                 * self.pow(a_NH3, 0.75)
-                / (self.c_small + np.maximum(a_H2, 0.0)) ** 1.125
+                / (A_SMALL + np.maximum(a_H2, 0.0)) ** 1.125
             )
             / (
                 1.0

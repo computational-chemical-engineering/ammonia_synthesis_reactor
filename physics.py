@@ -46,7 +46,6 @@ def get_axial_bcs_for_flow(
     is_counter_current: bool,
     u_ax: NDArray,
     bc_inlet: Dict,
-    bc_outlet: Dict,
     inflow_value: Optional[NDArray] = None,
 ) -> Tuple[Dict, Dict]:
     """Determine axial boundary conditions based on flow direction.
@@ -60,7 +59,6 @@ def get_axial_bcs_for_flow(
         is_counter_current: True if retentate flows opposite to permeate
         u_ax: Axial velocity at faces, shape (num_z+1, num_r)
         bc_inlet: BC dict for inlet boundary
-        bc_outlet: BC dict for outlet boundary
         inflow_value: Optional value for inflow BC at outlet (reverse flow).
                       Can be scalar or array with shape matching field.
 
@@ -73,26 +71,36 @@ def get_axial_bcs_for_flow(
 
     if is_counter_current:
         # Inlet at z=L (right), outlet at z=0 (left)
-        bc_left = bc_outlet  # outlet
         bc_right = bc_inlet  # inlet
         # Check for reverse flow at outlet (z=0)
         is_inflow = u_ax[0, :] > 0
         if np.any(is_inflow) and inflow_value is not None:
-            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
-            a_out = 1.0 - b_out
-            d_out = b_out * inflow_value
+            # b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            # a_out = 1.0 - b_out
+            # d_out = b_out * inflow_value
+            b_out = 0
+            d_out = 0
+            a_out = (~is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            u_ax[0, is_inflow] = 0
             bc_left = {"a": a_out, "b": b_out, "d": d_out}
+        else:
+            bc_left = {"a": 1.0, "b": 0, "d": 0}
     else:
         # Inlet at z=0 (left), outlet at z=L (right)
         bc_left = bc_inlet  # inlet
-        bc_right = bc_outlet  # outlet
         # Check for reverse flow at outlet (z=L)
         is_inflow = u_ax[-1, :] < 0
         if np.any(is_inflow) and inflow_value is not None:
-            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
-            a_out = 1.0 - b_out
-            d_out = b_out * inflow_value
+#            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+#            a_out = 1.0 - b_out
+#            d_out = b_out * inflow_value
+            b_out = 0
+            d_out = 0
+            a_out = (~is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            u_ax[-1, is_inflow] = 0
             bc_right = {"a": a_out, "b": b_out, "d": d_out}
+        else:
+            bc_right = {"a": 1.0, "b": 0, "d": 0}
 
     return bc_left, bc_right
 
@@ -308,6 +316,7 @@ ERGUN_INERTIAL_COEFF = 1.75  # Inertial term coefficient
 PERM_RAD_FACTOR = 10.0  # Radial permeability multiplier for permeate
 HAGEN_POISEUILLE_COEFF = 0.25  # Coefficient in Hagen-Poiseuille law
 
+#test: set inertial coeff to 0 to isolate viscous effects
 
 def compute_permeate_permeability(
     r_max_perm: float,

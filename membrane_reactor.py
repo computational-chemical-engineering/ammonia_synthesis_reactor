@@ -5,6 +5,9 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
+# test: diffusion coefficient is 0
+# test: simplify ergun
+
 import numpy as np
 from numpy.typing import NDArray
 import scipy.sparse.linalg as sla
@@ -147,15 +150,15 @@ class MembraneReactor:
         self._init_config(config_file, kwargs)
         self._init_derived_parameters()
         self._init_fields(c, p, T)
-        _, T_ret = self._split_perm_and_ret(self.T)
-        _, p_ret = self._split_perm_and_ret(self.c_p[..., -1])
+        _, T_ret = self._split_perm_and_ret(self.cpT[..., -1])
+        _, p_ret = self._split_perm_and_ret(self.cpT[..., -2])
 
         self.kinetics = AmmoniaSynthesisKinetics(
             self.species, T=T_ret, p=p_ret, rho_b=self.rho_b, rho_c=self.rho_c
         )
         self._init_jac()
-        self.factor_norm_c = (self.c_p[..., :-1].size) ** (-1.0 / self.ord_norm)
-        self.factor_norm_p = (self.c_p[..., -1].size) ** (-1.0 / self.ord_norm)
+        self.factor_norm_c = (self.cpT[..., :-2].size) ** (-1.0 / self.ord_norm)
+        self.factor_norm_p = (self.cpT[..., -2].size) ** (-1.0 / self.ord_norm)
 
         dt_cfl = self._compute_dt_cfl(cfl=CFL_INIT)
         self.solve(dt=dt_cfl, use_adaptive_react=False, num_timesteps=2)
@@ -291,16 +294,16 @@ class MembraneReactor:
             T: Initial temperature field (num_z, num_r). If None, uses inlet temps.
 
         Returns:
-            Tuple of (c_p, T) initialized field arrays.
+            cpT initialized field array.
         """
-        shape_c_p = (self.num_z, self.num_r, self.num_c + 1)
+        shape_cpT = (self.num_z, self.num_r, self.num_c + 2)
         shape_c = (self.num_z, self.num_r, self.num_c)
         shape_p = (self.num_z, self.num_r)
         shape_T = (self.num_z, self.num_r)
 
-        self.c_p = np.empty(shape_c_p)
+        self.cpT = np.empty(shape_cpT)
         if c is None:
-            c = self.c_p[..., :-1]
+            c = self.cpT[..., :-2]
             c_ret = c[:, self.num_r_perm :, :]
             c_ret_0 = (
                 self.correlation.molar_density(
@@ -318,9 +321,9 @@ class MembraneReactor:
             )
             c_perm[...] = np.broadcast_to(c_perm_0.reshape((1, 1, -1)), c_perm.shape)
         else:
-            self.c_p[..., :-1] = np.broadcast_to(np.array(c), shape_c).copy()
-            c_ret = self.c_p[:, self.num_r_perm :, :-1]
-            c_perm = self.c_p[:, : self.num_r_perm, :-1]
+            self.cpT[..., :-2] = np.broadcast_to(np.array(c), shape_c).copy()
+            c_ret = self.cpT[:, self.num_r_perm :, :-2]
+            c_perm = self.cpT[:, : self.num_r_perm, :-2]
 
         self.c_ret_ax = interp_cntr_to_stagg(c_ret, x_f=self.z_f, x_c=self.z_c, axis=0)
         self.c_ret_rad = interp_cntr_to_stagg(
@@ -333,10 +336,8 @@ class MembraneReactor:
             c_perm, x_f=self.r_f_perm, x_c=self.r_c_perm, axis=1
         )
 
-        self.g_react_source = np.zeros(c_ret.shape)
-
         if p is None:
-            p = self.c_p[:, :, -1]
+            p = self.cpT[:, :, -2]
             p_ret = p[:, self.num_r_perm :]
             p_ret[:, :] = np.broadcast_to(
                 np.array(self.p_ret_out).reshape((1, 1)), p_ret.shape
@@ -346,22 +347,22 @@ class MembraneReactor:
                 np.array(self.p_perm_out).reshape((1, 1)), p_perm.shape
             )
         else:
-            self.c_p[..., -1] = np.broadcast_to(np.array(p), shape_p).copy()
+            self.cpT[..., -2] = np.broadcast_to(np.array(p), shape_p).copy()
 
         if T is None:
-            self.T = np.empty(shape_T)
-            T_ret = self.T[:, self.num_r_perm :]
+            T = self.cpT[..., -1]
+            T_ret = T[:, self.num_r_perm :]
             T_ret[:, :] = np.broadcast_to(
                 np.array(self.T_ret_init).reshape((1, 1)), T_ret.shape
             )
-            T_perm = self.T[:, : self.num_r_perm]
+            T_perm = T[:, : self.num_r_perm]
             T_perm[:, :] = np.broadcast_to(
                 np.array(self.T_perm_init).reshape((1, 1)), T_perm.shape
             )
         else:
-            self.T = np.broadcast_to(np.array(T), shape_T).copy()
+            self.cpT[..., -1] = np.broadcast_to(np.array(T), shape_T).copy()
 
-        c = self.c_p[..., :-1]
+        c = self.cpT[..., :-2]
         c_perm = np.sum(c[:, 0 : self.num_r_perm, :], axis=-1)
         c_perm_ax = interp_cntr_to_stagg(c_perm, self.z_f, self.z_c, axis=0)
         c_ret = np.sum(c[:, self.num_r_perm :, :], axis=-1)
@@ -374,10 +375,10 @@ class MembraneReactor:
         self.u_ret_rad = np.zeros((self.num_z, self.num_r_ret + 1))
         self.div_u = np.zeros((self.num_z, self.num_r))
 
-        self.cnt_num_solves_c_p = 0
+        self.cnt_num_solves_cpT = 0
         self.cnt_num_solves_T = 0
 
-        return self.c_p, self.T
+        return self.cpT, self.cpT[..., -1]
 
     def _init_jac(self):
         """Initialize Jacobian matrices for the coupled system.
@@ -797,16 +798,16 @@ class MembraneReactor:
         equation for pressure drop in the packed bed retentate side.
 
         Args:
-            c: Concentration field. Defaults to self.c_p[..., :-1].
-            T: Temperature field. Defaults to self.T.
-            p: Pressure field. Defaults to self.c_p[..., -1].
+            c: Concentration field. Defaults to self.cpT[..., :-2].
+            T: Temperature field. Defaults to self.cpT[..., -1].
+            p: Pressure field. Defaults to self.cpT[..., -2].
         """
         if c is None:
-            c = self.c_p[..., :-1]
+            c = self.cpT[..., :-2]
         if T is None:
-            T = self.T
+            T = self.cpT[..., -1]
         if p is None:
-            p = self.c_p[..., -1]
+            p = self.cpT[..., -2]
         c_perm, c_ret = self._split_perm_and_ret(c)
         T_perm, T_ret = self._split_perm_and_ret(T)
         p_perm, p_ret = self._split_perm_and_ret(p)
@@ -894,9 +895,9 @@ class MembraneReactor:
         """Assemble diffusion and membrane permeation residual.
 
         Args:
-            c: Concentration field (num_z, num_r, num_c). Defaults to self.c_p.
-            T: Temperature field (num_z, num_r). Defaults to self.T.
-            p: Pressure field (num_z, num_r). Defaults to self.c_p[...,-1].
+            c: Concentration field (num_z, num_r, num_c). Defaults to self.cpT.
+            T: Temperature field (num_z, num_r). Defaults to self.cpT[..., -1].
+            p: Pressure field (num_z, num_r). Defaults to self.cpT[..., -2].
             compute_jac: If True, compute and cache the Jacobian.
 
         Returns:
@@ -905,11 +906,11 @@ class MembraneReactor:
         shape_c_ret = (self.num_z, self.num_r_ret, self.num_c)
         shape_c_perm = (self.num_z, self.num_r_perm, self.num_c)
         if c is None:
-            c = self.c_p[..., :-1]
+            c = self.cpT[..., :-2]
         if T is None:
-            T = self.T
+            T = self.cpT[..., -1]
         if p is None:
-            p = self.c_p[..., -1]
+            p = self.cpT[..., -2]
         c_perm, c_ret = self._split_perm_and_ret(c)
         T_perm, T_ret = self._split_perm_and_ret(T)
         p_perm, p_ret = self._split_perm_and_ret(p)
@@ -919,7 +920,7 @@ class MembraneReactor:
         g_vect = g.reshape((-1, 1))
         if compute_jac or not hasattr(self, "jac_c_diff"):
             y_ret = c_ret / np.sum(c_ret, axis=-1, keepdims=True)  # Mole fractions
-            diff_field_ret = self.correlation.diffusion(y_ret, T_ret, p_ret)
+            diff_field_ret = 0.0*self.correlation.diffusion(y_ret, T_ret, p_ret)
             diff_field_ret_ax = interp_cntr_to_stagg(
                 diff_field_ret, x_f=self.z_f, x_c=self.z_c, axis=0
             )
@@ -934,7 +935,7 @@ class MembraneReactor:
             )
 
             y_perm = c_perm / np.sum(c_perm, axis=-1, keepdims=True)  # Mole fractions
-            diff_field_perm = self.correlation.diffusion(y_perm, T_perm, p_perm)
+            diff_field_perm = 0.0*self.correlation.diffusion(y_perm, T_perm, p_perm)
             diff_field_perm_ax = interp_cntr_to_stagg(
                 diff_field_perm, x_f=self.z_f, x_c=self.z_c, axis=0
             )
@@ -1004,6 +1005,8 @@ class MembraneReactor:
                 self.div_c_ret_rad @ flux_matrix_ret_mem
                 + self.div_c_perm_rad @ flux_matrix_perm_mem
             )
+            self.flux_matrix_ret_mem = flux_matrix_ret_mem
+            self.flux_matrix_perm_mem = flux_matrix_perm_mem
 
         g_vect[...] = self.g_bc_c_diff + self.jac_c_diff @ c.reshape((-1, 1))
         return g, self.jac_c_diff
@@ -1021,7 +1024,7 @@ class MembraneReactor:
         vel_bc_ret_out = -(self.k_matrix_ret_ax @ self.grad_bc_p_ret_ax)
         vel_matrix_ret_rad = (-self.k_matrix_ret_rad) @ self.grad_p_ret_rad
         if p is None:
-            p_vec = self.c_p[..., -1].reshape((-1, 1))
+            p_vec = self.cpT[..., -2].reshape((-1, 1))
         else:
             p_vec = p.reshape((-1, 1))
         self.u_perm_ax.reshape((-1, 1))[...] = (
@@ -1050,7 +1053,7 @@ class MembraneReactor:
             + self.div_p_perm_rad @ self.u_perm_rad.ravel()
             + self.div_p_ret_ax @ self.u_ret_ax.ravel()
             + self.div_p_ret_rad @ self.u_ret_rad.ravel()
-        ).reshape(self.T.shape)
+        ).reshape(self.cpT[..., -1].shape)
 
         return self.u_perm_ax, self.u_perm_rad, self.u_ret_ax, self.u_ret_rad
 
@@ -1058,14 +1061,14 @@ class MembraneReactor:
         """Assemble convective species transport residual using upwind/TVD.
 
         Args:
-            c (ndarray|None): Concentration field (optional, defaults to self.c_p).
+            c (ndarray|None): Concentration field (optional, defaults to self.cpT).
             compute_jac (bool): If True, compute Jacobian sparsity pattern.
 
         Returns:
-            tuple: (g, jac) residual and Jacobian (or None if compute_jac=False)
+            tuple: (g, jac, jac_p) residual and Jacobian (or None if compute_jac=False)
         """
         if c is None:
-            c = self.c_p[..., :-1]
+            c = self.cpT[..., :-2]
 
         # Determine retentate axial BCs with inflow adjustment for reverse flow
         inflow_conc = (
@@ -1075,7 +1078,6 @@ class MembraneReactor:
             is_counter_current=self.is_counter_current,
             u_ax=self.u_ret_ax,
             bc_inlet=self.BC_NONE,
-            bc_outlet=self.BC_NEUMANN_HOM,
             inflow_value=inflow_conc,
         )
 
@@ -1089,7 +1091,7 @@ class MembraneReactor:
         bc_perm_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
         bc_perm_rad = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
 
-        self.c_perm_ax, _ = interp_cntr_to_stagg_tvd(
+        c_perm_ax, _ = interp_cntr_to_stagg_tvd(
             c_perm,
             self.z_f,
             self.z_c,
@@ -1098,10 +1100,10 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=0,
         )
-        flux_perm_ax = u_perm_ax * self.c_perm_ax
+        flux_perm_ax = u_perm_ax * c_perm_ax
         g_vect[:] = self.div_c_perm_ax @ flux_perm_ax.ravel()
 
-        self.c_perm_rad, _ = interp_cntr_to_stagg_tvd(
+        c_perm_rad, _ = interp_cntr_to_stagg_tvd(
             c_perm,
             self.r_f_perm,
             self.r_c_perm,
@@ -1119,7 +1121,7 @@ class MembraneReactor:
         u_ret_rad = self.u_ret_rad[..., np.newaxis]
         bc_ret_rad = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
 
-        self.c_ret_ax, _ = interp_cntr_to_stagg_tvd(
+        c_ret_ax, _ = interp_cntr_to_stagg_tvd(
             c_ret,
             self.z_f,
             self.z_c,
@@ -1131,7 +1133,7 @@ class MembraneReactor:
         flux_ret_ax = u_ret_ax * self.c_ret_ax
         g_vect[:] += self.div_c_ret_ax @ flux_ret_ax.ravel()
 
-        self.c_ret_rad, _ = interp_cntr_to_stagg_tvd(
+        c_ret_rad, _ = interp_cntr_to_stagg_tvd(
             c_ret,
             self.r_f_ret,
             self.r_c_ret,
@@ -1149,6 +1151,14 @@ class MembraneReactor:
                 c_perm.shape, self.z_f, self.z_c, bc=bc_perm_ax, v=u_perm_ax, axis=0
             )
             jac_perm = self.div_c_perm_ax @ conv_matrix_perm_ax
+            
+            ck_matrix = (
+                construct_coefficient_matrix(
+                    c_perm_ax, shape=(c_perm_ax.shape, c_perm_ax.shape[:-1]+(1,)))
+                @ self.k_matrix_perm_ax
+            )
+            jac_darcy = self.div_c_perm_ax @ ((-ck_matrix) @ self.grad_p_perm_ax)
+                        
             conv_matrix_perm_rad, _ = construct_convflux_upwind(
                 c_perm.shape,
                 self.r_f_perm,
@@ -1159,11 +1169,26 @@ class MembraneReactor:
             )
             jac_perm += self.div_c_perm_rad @ conv_matrix_perm_rad
 
+            ck_matrix = (
+                construct_coefficient_matrix(
+                    c_perm_rad, shape=(c_perm_rad.shape, c_perm_rad.shape[:-1]+(1,)))
+                @ self.k_matrix_perm_rad
+            )
+            jac_darcy += self.div_c_perm_rad @ ((-ck_matrix) @ self.grad_p_perm_rad)
+
             # Retentate Jacobian
             conv_matrix_ret_ax, _ = construct_convflux_upwind(
                 c_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax, axis=0
             )
             jac_ret = self.div_c_ret_ax @ conv_matrix_ret_ax
+    
+            ck_matrix = (
+                construct_coefficient_matrix(
+                    c_ret_ax, shape=(c_ret_ax.shape, c_ret_ax.shape[:-1]+(1,)))
+                @ self.k_matrix_ret_ax
+            )
+            jac_darcy += self.div_c_ret_ax @ ((-ck_matrix) @ self.grad_p_ret_ax)
+
             conv_matrix_ret_rad, _ = construct_convflux_upwind(
                 c_ret.shape,
                 self.r_f_ret,
@@ -1173,6 +1198,14 @@ class MembraneReactor:
                 axis=1,
             )
             jac_ret += self.div_c_ret_rad @ conv_matrix_ret_rad
+
+            ck_matrix = (
+                construct_coefficient_matrix(
+                    c_ret_rad, shape=(c_ret_rad.shape, c_ret_rad.shape[:-1]+(1,)))
+                @ self.k_matrix_ret_rad
+            )
+            jac_darcy += self.div_c_ret_rad @ ((-ck_matrix) @ self.grad_p_ret_rad)
+
 
             # Remap to monolithic indices
             jac_perm = update_csc_array_indices(
@@ -1184,12 +1217,12 @@ class MembraneReactor:
                 (None, c.shape),
                 offset=(None, (0, self.num_r_perm, 0)),
             )
-            return g, jac_perm + jac_ret
+            return g, jac_perm + jac_ret, jac_darcy
 
-        return g, None
+        return g, None, None
 
-    def _construct_g_c_p(
-        self, c_old, T_old, dt, compute_jac=False, kinetics_as_source=False
+    def _construct_g_cpT(
+        self, c_old, T_old, dt, compute_jac=False,
     ):
         """Construct coupled concentration-pressure residual and Jacobian.
 
@@ -1198,18 +1231,17 @@ class MembraneReactor:
             T_old: Previous temperature field (unused, for API consistency).
             dt: Time step size.
             compute_jac: If True, compute the Jacobian matrix.
-            kinetics_as_source: If True, use cached reaction source term.
 
         Returns:
             Tuple of (g, jac) where g is the residual array (num_z, num_r, num_c+1)
             and jac is the sparse Jacobian (or None if compute_jac=False).
         """
-        c_p = self.c_p
-        T = self.T
-        c = c_p[..., :-1]
-        p = c_p[..., -1]
-        shape_c_p = c_p.shape
-        g = np.empty(shape_c_p)
+        cpT = self.cpT
+        c = cpT[..., :-2]
+        p = cpT[..., -2]
+        T = self.cpT[..., -1]
+        shape_cpT = cpT.shape
+        g = np.empty(shape_cpT)
         c_sum = np.sum(c, axis=-1)
         y = c / c_sum[..., np.newaxis]
 
@@ -1217,46 +1249,64 @@ class MembraneReactor:
         c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
         _, p_ret = self._split_perm_and_ret(p)
         p_over_c_tot = p_ret[..., np.newaxis] / c_tot_ret
-
-        g_conv, jac_conv = self._construct_g_conv(c, compute_jac=compute_jac)
+        T_ret = T[:, self.num_r_perm :]        
+        
+        self._construct_darcy_matrices(c=cpT[..., :-2], p=cpT[..., -2])
+        self._update_velocity_fields(p=self.cpT[..., -2])
+        g_conv, jac_conv, jac_darcy = self._construct_g_conv(c, compute_jac=compute_jac)
         g_diff, jac_diff = self._construct_g_diff(c, compute_jac=compute_jac)
+        g_T_conv, jac_T_conv, jac_T_darcy = self._construct_g_T_conv(T, compute_jac=compute_jac)
+        g_T_cond, jac_T_cond, cp_inv_mat = self._construct_g_T_cond(T)
         if compute_jac:
             jac_cc = jac_conv + jac_diff
             if c_old is not None:
                 jac_cc += (1.0 / dt) * self.jac_c_accum
-            if not kinetics_as_source:
-                g_react, jac_react = self.numjac(
-                    lambda c: self.factor_react * self.kinetics(c * p_over_c_tot), c_ret
-                )
-                shape_c_ret = c_ret.shape
-                offset = (0, self.num_r_perm, 0)
-                jac_react = update_csc_array_indices(
+            g_react, jac_react = self.numjac(
+                lambda c: self.factor_react * self.kinetics(c * p_over_c_tot), c_ret
+            )
+            shape_c_ret = c_ret.shape
+            offset = (0, self.num_r_perm, 0)
+            jac_react = update_csc_array_indices(
                     jac_react, shape_c_ret, c.shape, offset=offset
-                )
-                jac_cc -= jac_react
+            )
+            jac_cc -= jac_react
             c_tot, dc_tot_dp_mat = self.numjac_p(
                 lambda p: self.correlation.molar_density(y, T, p), p
             )
-            jac_darcy = self._construct_jac_darcy()
+            c_tot, dc_tot_dT_mat = self.numjac_p(
+                lambda T: self.correlation.molar_density(y, T, p), T, f_value=c_tot
+            )
+            #jac_darcy = self._construct_jac_darcy()
             jac_cp = jac_darcy
             jac_pp = self.factor_p * dc_tot_dp_mat
             jac_pc = -self.factor_p * self.sum_c
+            jac_pT = self.factor_p * dc_tot_dT_mat
+            jac_TT = (1.0 / dt) * self.jac_T_accum + jac_T_conv + jac_T_cond
+            jac_TP = jac_T_darcy
+        
             shape_c = c.shape
             shape_p = p.shape + (1,)
-            offset = (0,) * (c.ndim - 1) + (shape_c[-1],)
-            jac_cc = update_csc_array_indices(jac_cc, shape_c, shape_c_p)
-            jac_pp = update_csc_array_indices(jac_pp, shape_p, shape_c_p, offset=offset)
+            offset_p = (0,) * (c.ndim - 1) + (shape_c[-1],)
+            offset_T = (0,) * (c.ndim - 1) + (shape_c[-1]+1,)
+            jac_cc = update_csc_array_indices(jac_cc, shape_c, shape_cpT)
+            jac_pp = update_csc_array_indices(jac_pp, shape_p, shape_cpT, offset=offset_p)
             jac_cp = update_csc_array_indices(
-                jac_cp, (shape_c, shape_p), shape_c_p, offset=(None, offset)
+                jac_cp, (shape_c, shape_p), shape_cpT, offset=(None, offset_p)
             )
             jac_pc = update_csc_array_indices(
-                jac_pc, (shape_p, shape_c), shape_c_p, offset=(offset, None)
+                jac_pc, (shape_p, shape_c), shape_cpT, offset=(offset_p, None)
             )
-            self._jac = jac_cc + jac_pp + jac_cp + jac_pc
+            jac_pT = update_csc_array_indices(
+                jac_pT, (shape_p, shape_p), shape_cpT, offset=(offset_p, offset_T)
+            )
+            jac_TT = update_csc_array_indices(jac_TT, shape_p, shape_cpT, offset=offset_T)
+            jac_TP = update_csc_array_indices(
+                jac_TP, shape_p, shape_cpT, offset=(offset_T, offset_p)
+            )
+            self._jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT + jac_TP
         else:
             c_tot = self.correlation.molar_density(y, T, p)
-            if not kinetics_as_source:
-                g_react = self.factor_react * self.kinetics(c_ret * p_over_c_tot)
+            g_react = self.factor_react * self.kinetics(c_ret * p_over_c_tot)
 
         g_c = self.g_c_in.reshape(c.shape) + g_conv + g_diff
         if c_old is not None:
@@ -1264,14 +1314,22 @@ class MembraneReactor:
                 c.shape
             )
         g_ret = g_c[:, self.num_r_perm :, :]
-        if not kinetics_as_source:
-            self.g_react_source = g_react
-            g_ret[...] -= g_react
-        else:
-            g_ret[...] -= self.g_react_source
+        g_ret[...] += g_react
         g_p = self.factor_p * (c_tot - c_sum)
-        g[..., :-1] = g_c
-        g[..., -1] = g_p
+        g_T = g_T_conv + g_T_cond
+        if T_old is not None:
+            g_T += (self.jac_T_accum @ ((T - T_old).reshape((-1, 1)) / dt)).reshape(
+                T.shape
+            )
+        enthalpies = self.correlation.species_enthalpies(T_ret)
+        dH_react = np.sum(g_react * enthalpies, axis=-1)
+        g_T_ret = g_T[:, self.num_r_perm :]
+        g_T_ret[...] += (
+            dH_react * cp_inv_mat.data.reshape(T.shape)[:, self.num_r_perm :]
+        )
+        g[..., :-2] = g_c
+        g[..., -2] = g_p
+        g[..., -1] = g_T
         return g, self._jac
 
     def _construct_g_T_conv(self, T, compute_jac=False):
@@ -1294,7 +1352,6 @@ class MembraneReactor:
             is_counter_current=self.is_counter_current,
             u_ax=self.u_ret_ax,
             bc_inlet=bc_ret_dirichlet,
-            bc_outlet=self.BC_NEUMANN_HOM,
             inflow_value=inflow_T,
         )
 
@@ -1302,7 +1359,7 @@ class MembraneReactor:
         g_vect = g.ravel()
 
         T_perm = T[:, 0 : self.num_r_perm]
-        self.T_perm_ax, _ = interp_cntr_to_stagg_tvd(
+        T_perm_ax, _ = interp_cntr_to_stagg_tvd(
             T_perm,
             self.z_f,
             self.z_c,
@@ -1311,9 +1368,9 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=0,
         )
-        flux_perm_ax = self.u_perm_ax * self.T_perm_ax
+        flux_perm_ax = self.u_perm_ax * T_perm_ax
         g_vect[:] = self.div_p_perm_ax @ flux_perm_ax.ravel()
-        self.T_perm_rad, _ = interp_cntr_to_stagg_tvd(
+        T_perm_rad, _ = interp_cntr_to_stagg_tvd(
             T_perm,
             self.r_f_perm,
             self.r_c_perm,
@@ -1322,11 +1379,11 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=1,
         )
-        flux_perm_rad = self.u_perm_rad * self.T_perm_rad
+        flux_perm_rad = self.u_perm_rad * T_perm_rad
         g_vect[:] += self.div_p_perm_rad @ flux_perm_rad.ravel()
 
         T_ret = T[:, self.num_r_perm :]
-        self.T_ret_ax, _ = interp_cntr_to_stagg_tvd(
+        T_ret_ax, _ = interp_cntr_to_stagg_tvd(
             T_ret,
             self.z_f,
             self.z_c,
@@ -1335,9 +1392,9 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=0,
         )
-        flux_ret_ax = self.u_ret_ax * self.T_ret_ax
+        flux_ret_ax = self.u_ret_ax * T_ret_ax
         g_vect[:] += self.div_p_ret_ax @ flux_ret_ax.ravel()
-        self.T_ret_rad, _ = interp_cntr_to_stagg_tvd(
+        T_ret_rad, _ = interp_cntr_to_stagg_tvd(
             T_ret,
             self.r_f_ret,
             self.r_c_ret,
@@ -1346,9 +1403,8 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=1,
         )
-        flux_ret_rad = self.u_ret_rad * self.T_ret_rad
+        flux_ret_rad = self.u_ret_rad * T_ret_rad
         g_vect[:] += self.div_p_ret_rad @ flux_ret_rad.ravel()
-
         g_vect[:] -= (T * self.div_u).ravel()
 
         if compute_jac:
@@ -1361,6 +1417,14 @@ class MembraneReactor:
                 axis=0,
             )
             jac_perm = self.div_p_perm_ax @ conv_matrix_perm_ax
+            
+            Tk_matrix = (
+                construct_coefficient_matrix(T_perm_ax)
+                @ self.k_matrix_perm_ax
+            )
+            jac_darcy = self.div_p_perm_ax @ ((-Tk_matrix) @ self.grad_p_perm_ax)
+            jac_darcy_div = self.div_p_perm_ax @ (self.k_matrix_perm_ax @ self.grad_p_perm_ax)
+            
             conv_matrix_perm_rad, _ = construct_convflux_upwind(
                 T_perm.shape,
                 self.r_f_perm,
@@ -1370,10 +1434,26 @@ class MembraneReactor:
                 axis=1,
             )
             jac_perm += self.div_p_perm_rad @ conv_matrix_perm_rad
+
+            Tk_matrix = (
+                construct_coefficient_matrix(T_perm_rad)
+                @ self.k_matrix_perm_rad
+            )
+            jac_darcy += self.div_p_perm_rad @ ((-Tk_matrix) @ self.grad_p_perm_rad)
+            jac_darcy_div += self.div_p_perm_rad @ (self.k_matrix_perm_rad @ self.grad_p_perm_rad)
+
             conv_matrix_ret_ax, _ = construct_convflux_upwind(
                 T_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=self.u_ret_ax, axis=0
             )
             jac_ret = self.div_p_ret_ax @ conv_matrix_ret_ax
+            
+            Tk_matrix = (
+                construct_coefficient_matrix(T_ret_ax)
+                @ self.k_matrix_ret_ax
+            )
+            jac_darcy += self.div_p_ret_ax @ ((-Tk_matrix) @ self.grad_p_ret_ax)
+            jac_darcy_div += self.div_p_ret_ax @ (self.k_matrix_ret_ax @ self.grad_p_ret_ax)
+            
             conv_matrix_ret_rad, _ = construct_convflux_upwind(
                 T_ret.shape,
                 self.r_f_ret,
@@ -1383,6 +1463,15 @@ class MembraneReactor:
                 axis=1,
             )
             jac_ret += self.div_p_ret_rad @ conv_matrix_ret_rad
+
+            Tk_matrix = (
+                construct_coefficient_matrix(T_ret_rad)
+                @ self.k_matrix_ret_rad
+            )
+            jac_darcy += self.div_p_ret_rad @ ((-Tk_matrix) @ self.grad_p_ret_rad)
+            jac_darcy_div += self.div_p_ret_rad @ (self.k_matrix_ret_rad @ self.grad_p_ret_rad)
+            jac_darcy += construct_coefficient_matrix(T) @ jac_darcy_div
+
             jac_perm = update_csc_array_indices(
                 jac_perm, (None, T_perm.shape), (None, T.shape)
             )
@@ -1393,9 +1482,9 @@ class MembraneReactor:
                 offset=(None, (0, self.num_r_perm, 0)),
             )
             jac = jac_perm + jac_ret - construct_coefficient_matrix(self.div_u)
-            return g, jac
+            return g, jac, jac_darcy
         else:
-            return g, None
+            return g, None, None
 
     def _construct_g_T_cond(self, T):
         """Assemble conductive + membrane interfacial heat transfer residual.
@@ -1403,7 +1492,7 @@ class MembraneReactor:
         Returns:
             tuple: (g_cond, jac_cond, cp_inv_matrix)
         """
-        c = self.c_p[..., :-1]
+        c = self.cpT[..., :-2]
         g = np.empty(T.shape)
         g_vect = g.reshape((-1, 1))
 
@@ -1437,8 +1526,8 @@ class MembraneReactor:
 
         # Heat transfer through membrane - extract interface values
         bc_rad_hom = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
-        T_perm = self.T[:, 0 : self.num_r_perm]
-        T_ret = self.T[:, self.num_r_perm :]
+        T_perm = self.cpT[..., -1][:, 0 : self.num_r_perm]
+        T_ret = self.cpT[..., -1][:, self.num_r_perm :]
         _, _, T_perm_i, _ = compute_boundary_values(
             T_perm, self.r_f_perm, self.r_c_perm, bc=bc_rad_hom, axis=1
         )
@@ -1478,7 +1567,7 @@ class MembraneReactor:
         Nu_ret = self.Nu_ret(Re_ret, Pr_ret)
         h_ret = Nu_ret * lmbda_ret_rad[:, [0]] / self.dp
 
-        d_tube = 1.0 * self.r_f_perm[-1]
+        d_tube = 2.0 * self.r_f_perm[-1]
         visc_perm = self.correlation.viscosity(y_perm_i, T_perm_i)
         rho_perm = self.correlation.molecular_weight(c_perm_i)
         cp_perm = self.correlation.specific_heat(c_perm_i, T_perm_i)
@@ -1489,10 +1578,10 @@ class MembraneReactor:
 
         if self.nu == 1:
             resist_mem = (
-                self.r_f_perm[-1] * np.log(self.r_f_ret[0] / self.r_f_ret[-1])
+                self.r_f_perm[-1] * np.log(self.r_f_ret[0] / self.r_f_perm[-1])
             ) / self.lambda_mem
             factor_geom = self.r_f_ret[0] / self.r_f_perm[-1]
-            U = 1.0 / (1.0 / h_ret + resist_mem + 1.0 / (factor_geom * h_perm))
+            U = 1.0 / (1.0 / h_perm + resist_mem + 1.0 / (factor_geom * h_ret))
         else:
             resist_mem = (self.r_f_perm[-1] - self.r_f_ret[0]) / self.lambda_mem
             U = 1.0 / (1.0 / h_ret + resist_mem + 1.0 / h_perm)
@@ -1525,7 +1614,7 @@ class MembraneReactor:
 
     def _construct_g_T(self, T_old, dt, compute_jac=False):
         """Combine accumulation, convection, conduction for temperature residual."""
-        T = self.T
+        T = self.cpT[..., -1]
         g_conv, jac_conv = self._construct_g_T_conv(T, compute_jac=compute_jac)
         g_cond, jac_cond, cp_inv_mat = self._construct_g_T_cond(T)
         g = g_conv + g_cond
@@ -1544,14 +1633,14 @@ class MembraneReactor:
         Returns:
             tuple: (updated_c_tot, success_flag)
         """
-        c_p = self.c_p
-        T = self.T
-        c = c_p[..., :-1]
-        p = c_p[..., -1]
+        cpT = self.cpT
+        T = self.cpT[..., -1]
+        c = cpT[..., :-2]
+        p = cpT[..., -2]
         T_vec = T.ravel()
+        g_T, jac_T, cp_inv_mat = self._construct_g_T(T_old, dt, compute_jac=True)
         c_ret = c[:, self.num_r_perm :, :]
         T_ret = T[:, self.num_r_perm :]
-        g_T, jac_T, cp_inv_mat = self._construct_g_T(T_old, dt, compute_jac=True)
         g_T_ret = g_T[:, self.num_r_perm :]
         p_partial = (
             p[:, self.num_r_perm :, np.newaxis]
@@ -1572,10 +1661,10 @@ class MembraneReactor:
         )
         if success:
             T_vec[...] += dT
-        self.kinetics.set_T_and_p(T=self.T[:, self.num_r_perm :])
+        self.kinetics.set_T_and_p(T=self.cpT[..., -1][:, self.num_r_perm :])
         return success
 
-    def _solve_c_p(self, c_old, T_old, dt, verbose=0, use_line_search=False):
+    def _solve_cpT(self, c_old, T_old, dt, verbose=0, use_line_search=True):
         """Newton/line-search solve for species concentrations.
 
         Args:
@@ -1589,33 +1678,31 @@ class MembraneReactor:
             tuple: (g_norm, g_norm_init, g_p_norm, g_p_norm_init, success)
         """
         success = True
-        c_p = self.c_p
-        c_p_shape = c_p.shape
+        cpT = self.cpT
+        shape_cpT = cpT.shape
         ord = self.ord_norm
         factor_norm_c = self.factor_norm_c
         factor_norm_p = self.factor_norm_p
-        c_p_vec = c_p.ravel()
+        cpT_vec = cpT.ravel()
 
         # Define norm function for combined concentration + pressure residual
         def compute_norms(g):
-            g_c = np.linalg.norm(g[..., :-1].ravel(), ord=ord) * factor_norm_c
-            g_p = np.linalg.norm(g[..., -1].ravel(), ord=ord) * factor_norm_p
+            g_c = np.linalg.norm(g[..., :-2].ravel(), ord=ord) * factor_norm_c
+            g_p = np.linalg.norm(g[..., -2].ravel(), ord=ord) * factor_norm_p
             return g_c, g_p
 
         # Wrapper for residual evaluation with side effects
         def eval_residual(x_vec):
-            c_p_vec[:] = x_vec
-            self._update_velocity_fields(p=c_p[..., -1])
-            g, _ = self._construct_g_c_p(c_old, T_old, dt, compute_jac=False)
+            cpT_vec[:] = x_vec
+            self._update_velocity_fields(p=cpT[..., -2])
+            g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
             return g
 
         g_norm_init = None
         g_p_norm_init = None
 
         for k in range(self.num_concentration_iterations):
-            # Update Darcy matrices and compute residual + Jacobian
-            self._construct_darcy_matrices(c=c_p[..., :-1], p=c_p[..., -1])
-            g, jac = self._construct_g_c_p(c_old, T_old, dt, compute_jac=True)
+            g, jac = self._construct_g_cpT(c_old, T_old, dt, compute_jac=True)
             g_norm, g_p_norm = compute_norms(g)
 
             if k == 0:
@@ -1623,26 +1710,26 @@ class MembraneReactor:
                 g_p_norm_init = g_p_norm
 
             # Compute Newton step
-            dc_p = -sla.spsolve(jac, g.reshape((-1, 1)))
-            self.cnt_num_solves_c_p += 1
+            dcpT = -sla.spsolve(jac, g.reshape((-1, 1)))
+            self.cnt_num_solves_cpT += 1
 
             # Apply step with optional line search
             if use_line_search:
                 # Use armijo_line_search from solvers.py
                 def norm_fn(g_arr):
-                    g_c, g_p = compute_norms(g_arr.reshape(c_p_shape))
+                    g_c, g_p = compute_norms(g_arr.reshape(shape_cpT))
                     return max(g_c, g_p)  # Combined norm for line search
 
                 x_new, g_new_norm, alpha, ls_success = armijo_line_search(
-                    x=c_p_vec.copy(),
-                    dx=dc_p,
+                    x=cpT_vec.copy(),
+                    dx=dcpT,
                     g_norm=max(g_norm, g_p_norm),
                     residual_fn=lambda x: eval_residual(x).ravel(),
                     norm_fn=norm_fn,
                     armijo_coeff=ARMIJO_COEFF,
                     min_alpha=MIN_LINE_SEARCH_ALPHA,
                 )
-                c_p_vec[:] = x_new
+                cpT_vec[:] = x_new
 
                 if not ls_success:
                     success = False
@@ -1654,13 +1741,13 @@ class MembraneReactor:
                         )
             else:
                 # Full Newton step (no line search)
-                c_p_vec[:] = c_p_vec + dc_p
+                cpT_vec[:] = cpT_vec + dcpT
 
             # Update velocity fields after step
-            self._update_velocity_fields(p=c_p[..., -1])
+            self._update_velocity_fields(p=cpT[..., -2])
 
             # Recompute residual norms for convergence check
-            g, _ = self._construct_g_c_p(c_old, T_old, dt, compute_jac=False)
+            g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
             g_norm, g_p_norm = compute_norms(g)
 
             # Check convergence
@@ -1682,9 +1769,9 @@ class MembraneReactor:
 
     def _compute_dt_chem_min(self):
         """Return minimum explicit chemical time step avoiding negative c."""
-        c_ret = self.c_p[:, self.num_r_perm :, :-1]
+        c_ret = self.cpT[:, self.num_r_perm :, :-2]
         c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
-        _, p_ret = self._split_perm_and_ret(self.c_p[..., -1])
+        _, p_ret = self._split_perm_and_ret(self.cpT[..., -2])
         p_over_c_tot = p_ret[..., np.newaxis] / c_tot_ret
         rates = self.kinetics(c_ret * p_over_c_tot)
         eps = EPS_CHEM_TIMESTEP
@@ -1715,28 +1802,21 @@ class MembraneReactor:
         """
         g_norm_init = None
         g_p_norm_init = None
-        success = True
+        success = False
 
         for j in range(self.num_newton_iterations):
             # Solve concentration-pressure system
-            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success_c_p = (
-                self._solve_c_p(c_old, T_old, dt)
+            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success = (
+                self._solve_cpT(c_old, T_old, dt)
             )
-            self.kinetics.set_T_and_p(p=self.c_p[:, self.num_r_perm :, -1])
             logger.debug("Newton iteration %d: g_norm = %.4e", j, g_norm)
 
             if j == 0:
                 g_norm_init = g_norm_start
                 g_p_norm_init = g_p_norm_start
 
-            # Solve temperature (if non-isothermal)
-            success_T = True
-            if not self.is_isothermal:
-                success_T = self._solve_T(T_old, dt)
-                self.kinetics.set_T_and_p(T=self.T[:, self.num_r_perm :])
-
             # Check for divergence
-            if g_norm > 10 * g_norm_init or g_p_norm > 10 * g_p_norm_init:
+            if ~np.isfinite(g_norm) or (g_norm > 10 * g_norm_init):
                 return SegregatedSolveResult(
                     converged=False,
                     num_iterations=j + 1,
@@ -1745,8 +1825,6 @@ class MembraneReactor:
                     g_norm_init=g_norm_init,
                     g_p_norm_init=g_p_norm_init,
                 )
-
-            success = success_c_p and success_T
 
             # Check convergence
             if g_norm < max(self.rtol * g_norm_init, self.atol):
@@ -1798,10 +1876,10 @@ class MembraneReactor:
         if dt is None:
             dt = self.dt
 
-        self.cnt_num_solves_c_p, self.cnt_num_solves_T = 0, 0
+        self.cnt_num_solves_cpT = 0
         for i in range(num_timesteps):
-            T_old = self.T.copy()
-            c_old = self.c_p[..., :-1].copy()
+            T_old = self.cpT[..., -1].copy()
+            c_old = self.cpT[..., :-2].copy()
             if use_adaptive_react:
                 is_converged = self._solve_adaptive_react(dt, c_old, T_old, **kwargs)
             else:
@@ -1832,8 +1910,8 @@ class MembraneReactor:
         g_norm, g_p_norm = None, None
 
         # History for predictor step (current, previous)
-        c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
-        c_p_prev_prev, T_prev_prev = None, None
+        cpT_prev = self.cpT.copy()
+        cpT_prev_prev= None
         factor_react_prev, factor_react_prev_prev = None, None
 
         # --- Step 2: Main Continuation Loop ---
@@ -1855,27 +1933,25 @@ class MembraneReactor:
                 d_factor_hist = factor_react_prev - factor_react_prev_prev
                 if d_factor_hist > 1e-9:  # Avoid division by zero on retry
                     step_ratio = (self.factor_react - factor_react_prev) / d_factor_hist
-                    self.c_p = c_p_prev + (c_p_prev - c_p_prev_prev) * step_ratio
-                    self.T = T_prev + (T_prev - T_prev_prev) * step_ratio
-                    self.c_p = np.maximum(
-                        self.c_p, 0
-                    )  # Ensure concentrations are non-negative
+                    self.cpT = cpT_prev + (cpT_prev - cpT_prev_prev) * step_ratio
+#                    self.cpT = np.maximum(
+#                        self.cpT, 0
+#                    )  # Ensure concentrations are non-negative
                 else:
-                    self.c_p = c_p_prev.copy()
-                    self.T = T_prev.copy()
+                    self.cpT = cpT_prev.copy()
                 self.kinetics.set_T_and_p(
-                    T=self.T[:, self.num_r_perm :], p=self.c_p[:, self.num_r_perm :, -1]
+                    T=self.cpT[..., -1][:, self.num_r_perm :], p=self.cpT[:, self.num_r_perm :, -2]
                 )
                 self._construct_darcy_matrices()
-                self._update_velocity_fields(p=self.c_p[..., -1])
+                self._update_velocity_fields(p=self.cpT[..., -2])
             elif not is_first_step:
                 # Use a zero-order predictor (the last solution) for the first step
-                self.c_p, self.T = c_p_prev.copy(), T_prev.copy()
+                self.cpT = cpT_prev.copy()
                 self.kinetics.set_T_and_p(
-                    T=self.T[:, self.num_r_perm :], p=self.c_p[:, self.num_r_perm :, -1]
+                    T=self.cpT[..., -1][:, self.num_r_perm :], p=self.cpT[:, self.num_r_perm :, -2]
                 )
                 self._construct_darcy_matrices()
-                self._update_velocity_fields(p=self.c_p[..., -1])
+                self._update_velocity_fields(p=self.cpT[..., -2])
 
             # --- Corrector Step ---
             if verbose > 1:
@@ -1892,7 +1968,7 @@ class MembraneReactor:
                 result.convergence_factor,
                 result.convergence_factor_p,
             )
-            is_converging = (conv_factor < conv_factor_min) or is_converged
+            is_converging = np.isfinite(g_norm) and ((conv_factor < conv_factor_min) or is_converged)
             if is_converged and self.factor_react == factor_react_max:
                 break
             # --- Adapt Step Size ---
@@ -1909,9 +1985,9 @@ class MembraneReactor:
                     )
                 # Update history for the next predictor step
                 if not is_first_step:
-                    c_p_prev_prev, T_prev_prev = c_p_prev, T_prev
+                    cpT_prev_prev = cpT_prev
                     factor_react_prev_prev = factor_react_prev
-                    c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
+                    cpT_prev = self.cpT.copy()
                     factor_react_prev = self.factor_react
                     # Increase step size
                     if is_converged:
@@ -1927,7 +2003,7 @@ class MembraneReactor:
                     )
 
                 # Restore previous is_convergedful state
-                self.c_p, self.T = c_p_prev, T_prev
+                #self.cpT = cpT_prev
                 if is_first_step:
                     self.factor_react = 0.0
                     is_first_step = False
@@ -1942,8 +2018,11 @@ class MembraneReactor:
                     self.factor_react = factor_react_prev
                     # Decrease step size and retry from the last good point
                     dfactor_react *= self.dfactor_react_decrease
-                if dfactor_react < self.dfactor_react_min:
-                    break
+                    if dfactor_react < self.dfactor_react_min:
+                        break
+                    self.factor_react = min(
+                        self.factor_react + dfactor_react, factor_react_max
+                    )
         if is_converged:
             if verbose > 1:
                 logger.info(
@@ -2003,7 +2082,7 @@ class MembraneReactor:
         dt = dt_init
 
         # History for predictor step (current, previous)
-        c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
+        cpT_prev = self.cpT.copy()
         t = 0.0
         is_converged = False
         while t < t_final or not is_converged:
@@ -2014,7 +2093,7 @@ class MembraneReactor:
             except Exception:
                 is_converging = False
             if is_converging:
-                c_p_prev, T_prev = self.c_p.copy(), self.T.copy()
+                cpT_prev = self.cpT.copy()
                 t += dt
                 dt = min(t + dt * dt_factor_increase, t + dt_max, t_final) - t
                 if verbose > 1:
@@ -2025,14 +2104,14 @@ class MembraneReactor:
                 elif t >= t_final:
                     break
                 else:
-                    self.c_p, self.T = c_p_prev.copy(), T_prev.copy()
+                    self.cpT = cpT_prev.copy()
                     dt = max(dt * dt_factor_decrease, dt_min)
                     self.kinetics.set_T_and_p(
-                        T=self.T[:, self.num_r_perm :],
-                        p=self.c_p[:, self.num_r_perm :, -1],
+                        T=self.cpT[..., -1][:, self.num_r_perm :],
+                        p=self.cpT[:, self.num_r_perm :, -2],
                     )
                     self._construct_darcy_matrices()
-                    self._update_velocity_fields(p=self.c_p[..., -1])
+                    self._update_velocity_fields(p=self.cpT[..., -2])
                     if verbose > 1:
                         logger.info("Reduced dt to %.4e", dt)
         if verbose > 1 and not is_converged:
@@ -2044,18 +2123,18 @@ class MembraneReactor:
         shape_c_ret = (self.num_z, self.num_r_ret, self.num_c)
         shape_c_perm = (self.num_z, self.num_r_perm, self.num_c)
         if c is None:
-            c = self.c_p[..., :-1]
+            c = self.cpT[..., :-2]
         if T is None:
-            T = self.T
+            T = self.cpT[..., -1]
         if p is None:
-            p = self.c_p[..., -1]
+            p = self.cpT[..., -2]
         c_perm, c_ret = self._split_perm_and_ret(c)
         T_perm, T_ret = self._split_perm_and_ret(T)
         p_perm, p_ret = self._split_perm_and_ret(p)
         c_vect = c.reshape((-1, 1))
 
         y_ret = c_ret / np.sum(c_ret, axis=-1, keepdims=True)  # Mole fractions
-        diff_field_ret = self.correlation.diffusion(y_ret, T_ret, p_ret)
+        diff_field_ret = 0.0*self.correlation.diffusion(y_ret, T_ret, p_ret)
         diff_field_ret_ax = interp_cntr_to_stagg(
             diff_field_ret, x_f=self.z_f, x_c=self.z_c, axis=0
         )
@@ -2070,7 +2149,7 @@ class MembraneReactor:
         )
 
         y_perm = c_perm / np.sum(c_perm, axis=-1, keepdims=True)  # Mole fractions
-        diff_field_perm = self.correlation.diffusion(y_perm, T_perm, p_perm)
+        diff_field_perm = 0.0*self.correlation.diffusion(y_perm, T_perm, p_perm)
         diff_field_perm_ax = interp_cntr_to_stagg(
             diff_field_perm, x_f=self.z_f, x_c=self.z_c, axis=0
         )
@@ -2132,10 +2211,10 @@ class MembraneReactor:
 
         return fluxes_ret_ax, fluxes_ret_rad, fluxes_perm_ax, fluxes_perm_rad
 
-    def _compute_fluxes_conv(self, c=None, compute_jac=False):
+    def _compute_fluxes_conv(self, c=None):
         """Compute convective species fluxes using upwind TVD reconstructions."""
         if c is None:
-            c = self.c_p[..., :-1]
+            c = self.cpT[..., :-2]
 
         if self.is_counter_current:
             bc_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
