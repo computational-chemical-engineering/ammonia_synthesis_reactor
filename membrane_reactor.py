@@ -919,7 +919,8 @@ class MembraneReactor:
         g = np.empty(c.shape)
         g_vect = g.reshape((-1, 1))
         if compute_jac or not hasattr(self, "jac_c_diff"):
-            y_ret = c_ret / np.sum(c_ret, axis=-1, keepdims=True)  # Mole fractions
+            c_tot_ret_diff = np.maximum(np.abs(np.sum(c_ret, axis=-1, keepdims=True)), 1e-10)
+            y_ret = c_ret / c_tot_ret_diff  # Mole fractions
             diff_field_ret = 0.0*self.correlation.diffusion(y_ret, T_ret, p_ret)
             diff_field_ret_ax = interp_cntr_to_stagg(
                 diff_field_ret, x_f=self.z_f, x_c=self.z_c, axis=0
@@ -934,7 +935,8 @@ class MembraneReactor:
                 diff_field_ret_rad, shape_c_ret, axis=1
             )
 
-            y_perm = c_perm / np.sum(c_perm, axis=-1, keepdims=True)  # Mole fractions
+            c_tot_perm_diff = np.maximum(np.abs(np.sum(c_perm, axis=-1, keepdims=True)), 1e-10)
+            y_perm = c_perm / c_tot_perm_diff  # Mole fractions
             diff_field_perm = 0.0*self.correlation.diffusion(y_perm, T_perm, p_perm)
             diff_field_perm_ax = interp_cntr_to_stagg(
                 diff_field_perm, x_f=self.z_f, x_c=self.z_c, axis=0
@@ -1243,12 +1245,16 @@ class MembraneReactor:
         shape_cpT = cpT.shape
         g = np.empty(shape_cpT)
         c_sum = np.sum(c, axis=-1)
-        y = c / c_sum[..., np.newaxis]
+        # Use safe denominator for mole fractions to handle negative concentrations
+        c_sum_safe = np.maximum(np.abs(c_sum), 1e-10)
+        y = c / c_sum_safe[..., np.newaxis]
 
         c_ret = c[:, self.num_r_perm :, :]
         c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
         _, p_ret = self._split_perm_and_ret(p)
-        p_over_c_tot = p_ret[..., np.newaxis] / c_tot_ret
+        # Use safe denominator for pressure/concentration ratio
+        c_tot_ret_safe = np.maximum(np.abs(c_tot_ret), 1e-10)
+        p_over_c_tot = p_ret[..., np.newaxis] / c_tot_ret_safe
         T_ret = T[:, self.num_r_perm :]        
         
         self._construct_darcy_matrices(c=cpT[..., :-2], p=cpT[..., -2])
@@ -1527,7 +1533,8 @@ class MembraneReactor:
         g = np.empty(T.shape)
         g_vect = g.reshape((-1, 1))
 
-        y = c / np.sum(c, axis=-1, keepdims=True)  # Mole fractions
+        c_tot_safe = np.maximum(np.abs(np.sum(c, axis=-1, keepdims=True)), 1e-10)
+        y = c / c_tot_safe  # Mole fractions
         lmbda = self.correlation.thermal_conductivity(y, T)
         cp = self.correlation.specific_heat(c, T)
 
@@ -1725,8 +1732,8 @@ class MembraneReactor:
                 cpT_vec[:] = cpT_vec + dcpT
 
             # Enforce physical bounds to prevent NaN propagation
-            # Concentrations must be non-negative
-            cpT[..., :-2] = np.maximum(cpT[..., :-2], 1e-20)
+            # Note: Concentrations are allowed to go negative during Newton iterations
+            # The kinetics use safe power functions that handle negative values
             # Temperature must be positive and within reasonable bounds
             cpT[..., -1] = np.clip(cpT[..., -1], 200.0, 2000.0)
             # Pressure must be positive
@@ -2126,7 +2133,8 @@ class MembraneReactor:
         p_perm, p_ret = self._split_perm_and_ret(p)
         c_vect = c.reshape((-1, 1))
 
-        y_ret = c_ret / np.sum(c_ret, axis=-1, keepdims=True)  # Mole fractions
+        c_tot_ret_safe = np.maximum(np.abs(np.sum(c_ret, axis=-1, keepdims=True)), 1e-10)
+        y_ret = c_ret / c_tot_ret_safe  # Mole fractions
         diff_field_ret = 0.0*self.correlation.diffusion(y_ret, T_ret, p_ret)
         diff_field_ret_ax = interp_cntr_to_stagg(
             diff_field_ret, x_f=self.z_f, x_c=self.z_c, axis=0
@@ -2141,7 +2149,8 @@ class MembraneReactor:
             diff_field_ret_rad, shape_c_ret, axis=1
         )
 
-        y_perm = c_perm / np.sum(c_perm, axis=-1, keepdims=True)  # Mole fractions
+        c_tot_perm_safe = np.maximum(np.abs(np.sum(c_perm, axis=-1, keepdims=True)), 1e-10)
+        y_perm = c_perm / c_tot_perm_safe  # Mole fractions
         diff_field_perm = 0.0*self.correlation.diffusion(y_perm, T_perm, p_perm)
         diff_field_perm_ax = interp_cntr_to_stagg(
             diff_field_perm, x_f=self.z_f, x_c=self.z_c, axis=0
