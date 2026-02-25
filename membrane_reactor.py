@@ -1846,44 +1846,133 @@ class MembraneReactor:
     def solve(
         self,
         num_timesteps: Optional[int] = None,
-        dt: Optional[float] = None,
-        use_adaptive_react: bool = True,
+        dt_init: Optional[float] = None,
+        use_adaptive_dt: bool = True,
+        steady_state_tol: float = 1e-3,
+        verbose: int = 0,
         **kwargs: Any,
     ) -> bool:
         """Solve the steady-state reactor problem.
 
-        Uses adaptive time-stepping with predictor-corrector continuation on
-        the reaction rate scaling factor for robust convergence.
+        Uses adaptive time-stepping for robust and efficient convergence.
+        The pseudo-transient term (1/dt) regularizes the Newton iteration.
+        Small dt ensures convergence but is slow; large dt is fast but may
+        diverge. Adaptive dt starts small and increases as solution improves.
 
         Args:
-            num_timesteps: Number of pseudo-transient steps. Defaults to config value.
-            dt: Pseudo-time step size. Defaults to config value.
-            use_adaptive_react: If True, use adaptive continuation on reaction rate.
-            **kwargs: Additional arguments passed to adaptive solve methods.
+            num_timesteps: Maximum number of pseudo-transient steps.
+            dt_init: Initial time step. Defaults to self.dt_init.
+            use_adaptive_dt: If True, adapt dt based on convergence quality.
+            steady_state_tol: Relative tolerance for steady-state detection.
+            verbose: Verbosity level (0=silent, 1=summary, 2=detailed).
+            **kwargs: Additional arguments passed to solve methods.
 
         Returns:
             True if converged to steady state, False otherwise.
         """
-        # --- Initialization ---
-
-        is_converged = False
         if num_timesteps is None:
             num_timesteps = self.num_timesteps
-        if dt is None:
-            dt = self.dt
+        if dt_init is None:
+            dt_init = getattr(self, 'dt_init', 1e-3)
 
         self.cnt_num_solves_cpT = 0
+        dt = dt_init
+        dt_min = getattr(self, 'dt_min', 1e-6)
+        dt_max = getattr(self, 'dt_max', 1e3)
+        dt_increase = getattr(self, 'dt_increase_factor', 2.0)
+        dt_decrease = getattr(self, 'dt_decrease_factor', 0.5)
+        threshold = getattr(self, 'adaptive_dt_threshold', 0.5)
+
+        g_norm_prev = None
+        g_ss_norm = None
+        is_converged = False
+        consecutive_good_steps = 0
+
+        if verbose >= 1:
+            print(f"Starting adaptive dt solve: dt_init={dt_init:.2e}, "
+                  f"dt_range=[{dt_min:.2e}, {dt_max:.2e}]")
+
         for i in range(num_timesteps):
             T_old = self.cpT[..., -1].copy()
             c_old = self.cpT[..., :-2].copy()
-            # if use_adaptive_react:
-            #     is_converged = self._solve_adaptive_react(dt, c_old, T_old, **kwargs)
-            # else:
-            #     is_converged = self._solve_adaptive_dt(dt, c_old, T_old, **kwargs)
+            cpT_backup = self.cpT.copy()
+
+            # Attempt solve with current dt
             result = self._solve_step(c_old, T_old, dt)
-            num_iters = result.num_iterations
-            g_norm, g_p_norm = result.g_norm, result.g_p_norm
-            is_converged = result.converged
+            g_norm = result.g_norm
+
+            # Check for NaN or divergence
+            if not np.isfinite(g_norm) or (g_norm_prev is not None and g_norm > 10 * g_norm_prev):
+                # Reject step, restore state, decrease dt
+                self.cpT = cpT_backup
+                self._update_velocity_fields(self.cpT[..., -2])
+                dt = max(dt * dt_decrease, dt_min)
+                consecutive_good_steps = 0
+                if verbose >= 2:
+                    print(f"  Step {i}: REJECTED (divergence), dt -> {dt:.2e}")
+                continue
+
+            # Compute actual steady-state residual (without transient term)
+            # This is the residual with dt -> infinity
+            c_new = self.cpT[..., :-2]
+            T_new = self.cpT[..., -1]
+            g_ss, _ = self._construct_g_cpT(c_new.copy(), T_new.copy(), 1e10, compute_jac=False)
+            g_ss_norm = np.linalg.norm(g_ss)
+
+            # Check steady-state convergence (residual relative to solution)
+            cpT_norm = np.linalg.norm(self.cpT)
+            rel_residual = g_ss_norm / cpT_norm if cpT_norm > 0 else g_ss_norm
+
+            if rel_residual < steady_state_tol:
+                is_converged = True
+                if verbose >= 1:
+                    print(f"  Step {i}: CONVERGED to steady state, dt={dt:.2e}, "
+                          f"||g_ss||={g_ss_norm:.2e}, ||g_ss||/||x||={rel_residual:.2e}")
+                break
+
+            # Adapt dt based on steady-state residual progress
+            if use_adaptive_dt and g_norm_prev is not None:
+                reduction = g_ss_norm / g_norm_prev
+
+                if reduction < threshold:
+                    # Good progress - increase dt
+                    consecutive_good_steps += 1
+                    if consecutive_good_steps >= 2:
+                        dt = min(dt * dt_increase, dt_max)
+                        consecutive_good_steps = 0
+                    if verbose >= 2:
+                        print(f"  Step {i}: good (red={reduction:.2f}), dt -> {dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+                elif reduction > 1.5:
+                    # Residual increased significantly - decrease dt
+                    dt = max(dt * dt_decrease, dt_min)
+                    consecutive_good_steps = 0
+                    if verbose >= 2:
+                        print(f"  Step {i}: poor (red={reduction:.2f}), dt -> {dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+                elif reduction > 0.98:
+                    # Progress stalled - try increasing dt to make larger steps
+                    # Near steady state, larger dt means bigger steps toward equilibrium
+                    consecutive_good_steps += 1
+                    if consecutive_good_steps >= 3:
+                        dt = min(dt * dt_increase, dt_max)
+                        consecutive_good_steps = 0
+                        if verbose >= 2:
+                            print(f"  Step {i}: stalled, increasing dt -> {dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+                    elif verbose >= 2:
+                        print(f"  Step {i}: slow (red={reduction:.2f}), dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+                else:
+                    # Modest progress - keep dt
+                    consecutive_good_steps = 0
+                    if verbose >= 2:
+                        print(f"  Step {i}: ok (red={reduction:.2f}), dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+            elif verbose >= 2:
+                print(f"  Step {i}: dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+
+            g_norm_prev = g_ss_norm
+
+        if verbose >= 1 and not is_converged:
+            print(f"  Did not converge after {num_timesteps} steps, "
+                  f"final ||g_ss||={g_ss_norm:.2e}, dt={dt:.2e}")
+
         return is_converged
 
     def _solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose=0):
