@@ -48,7 +48,7 @@ DEFAULTS = {
     "rtol": 1e-6,  # Convergence relative tolerance for Newton's method
     "atol": 1e-4,  # Convergence absolute tolerance for Newton's method
     "rtol_p": 1e-6,  # Relative tolerance for pressure convergence
-    "atol_p": 0.0,  # Absolute tolerance for pressure convergence
+    "atol_p": 1e-6,  # Absolute tolerance for pressure convergence (must be > 0 when initial g_p = 0)
     "rtol_c": 1e-6,  # Relative tolerance for concentration convergence
     "atol_c": 1e-4,  # Absolute tolerance for concentration convergence
     "ord_norm": 2,  # Order of norm for convergence criteria
@@ -61,6 +61,10 @@ DEFAULTS = {
     "dfactor_react_min": 1e-4,  # Minimum value for dfactor_react
     "dfactor_react_increase": 1.5,  # Factor by which to increase dfactor_react
     "dfactor_react_decrease": 0.5,  # Factor by which to decrease dfactor_react
+    # factor_p: Scaling factor for pressure equation (g_p = factor_p * (c_tot - sum(c)))
+    # Higher values (1e3-1e6) improve Jacobian conditioning by making pressure diagonal
+    # comparable to concentration/temperature diagonals. Default 1.0 may cause singular
+    # matrices for some problems due to very small dc_tot/dp derivatives (~2e-4).
     "factor_p": 1.0,
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
