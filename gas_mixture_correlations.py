@@ -271,6 +271,9 @@ class GasMixtureCorrelations:
         y_t = y.reshape(shape_t_y)
         T_t = T.reshape(shape_t_T)
 
+        # Safeguard: clip temperature to valid range for correlations
+        T_t = np.clip(T_t, 200.0, 3000.0)
+
         # Compute pure component viscosities (mu_i) using the Wilke correlation
         mu_i = (
             self.wilke_C1
@@ -325,6 +328,9 @@ class GasMixtureCorrelations:
         y_t = y.reshape(shape_t_y)
         T_t = T.reshape(shape_t_T)
 
+        # Safeguard: clip temperature to valid range for correlations
+        T_t = np.clip(T_t, 200.0, 3000.0)
+
         # Compute pure component viscosities (mu_i) using the Wilke correlation
         mu_i = (
             self.wilke_C1
@@ -376,6 +382,11 @@ class GasMixtureCorrelations:
             Cubic spline for the specific heat capacity of the species.
         """
         T_lin = np.asarray(T).ravel()
+
+        # Safeguard: clip temperatures to valid range and handle NaN
+        T_lin = np.clip(T_lin, 200.0, 3000.0)
+        T_lin = np.nan_to_num(T_lin, nan=300.0)  # Replace any remaining NaN
+
         T_min = np.min(T_lin)
         T_max = np.max(T_lin)
         if T_ref is not None:
@@ -565,6 +576,10 @@ class GasMixtureCorrelations:
         y_t = y.reshape(shape_t_y)
         T_t = T.reshape(shapes_t[0])
         p_t = p.reshape(shapes_t[1])
+
+        # Safeguard: clip temperature and pressure to valid ranges
+        T_t = np.clip(T_t, 200.0, 3000.0)
+        p_t = np.maximum(p_t, 1e3)  # Minimum pressure 1 kPa
 
         y_t = np.where(y_t < 1e-10, 1e-10, y_t)
         y_t = y_t / np.sum(y_t, axis=1, keepdims=True)

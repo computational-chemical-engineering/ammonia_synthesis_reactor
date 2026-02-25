@@ -1112,7 +1112,7 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=1,
         )
-        flux_perm_rad = u_perm_rad * self.c_perm_rad
+        flux_perm_rad = u_perm_rad * c_perm_rad
         g_vect[:] += self.div_c_perm_rad @ flux_perm_rad.ravel()
 
         # Retentate region convection
@@ -1130,7 +1130,7 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=0,
         )
-        flux_ret_ax = u_ret_ax * self.c_ret_ax
+        flux_ret_ax = u_ret_ax * c_ret_ax
         g_vect[:] += self.div_c_ret_ax @ flux_ret_ax.ravel()
 
         c_ret_rad, _ = interp_cntr_to_stagg_tvd(
@@ -1142,7 +1142,7 @@ class MembraneReactor:
             tvd_limiter=upwind,
             axis=1,
         )
-        flux_ret_rad = u_ret_rad * self.c_ret_rad
+        flux_ret_rad = u_ret_rad * c_ret_rad
         g_vect[:] += self.div_c_ret_rad @ flux_ret_rad.ravel()
 
         if compute_jac:
@@ -1255,8 +1255,19 @@ class MembraneReactor:
         self._update_velocity_fields(p=self.cpT[..., -2])
         g_conv, jac_conv, jac_darcy = self._construct_g_conv(c, compute_jac=compute_jac)
         g_diff, jac_diff = self._construct_g_diff(c, compute_jac=compute_jac)
-        g_T_conv, jac_T_conv, jac_T_darcy = self._construct_g_T_conv(T, compute_jac=compute_jac)
-        g_T_cond, jac_T_cond, cp_inv_mat = self._construct_g_T_cond(T)
+
+        # Handle isothermal mode: skip temperature solve if enabled
+        if self.is_isothermal:
+            g_T_conv = np.zeros_like(T)
+            g_T_cond = np.zeros_like(T)
+            jac_T_conv = None
+            jac_T_darcy = None
+            jac_T_cond = None
+            # Use unit cp for energy scaling (not used in isothermal mode)
+            cp_inv_mat = construct_coefficient_matrix(np.ones_like(T))
+        else:
+            g_T_conv, jac_T_conv, jac_T_darcy = self._construct_g_T_conv(T, compute_jac=compute_jac)
+            g_T_cond, jac_T_cond, cp_inv_mat = self._construct_g_T_cond(T)
         if compute_jac:
             jac_cc = jac_conv + jac_diff
             if c_old is not None:
@@ -1281,8 +1292,14 @@ class MembraneReactor:
             jac_pp = self.factor_p * dc_tot_dp_mat
             jac_pc = -self.factor_p * self.sum_c
             jac_pT = self.factor_p * dc_tot_dT_mat
-            jac_TT = (1.0 / dt) * self.jac_T_accum + jac_T_conv + jac_T_cond
-            jac_TP = jac_T_darcy
+            # Handle isothermal mode: simplified temperature Jacobian
+            if self.is_isothermal:
+                # Pin temperature to initial value: g_T = T - T_init = 0
+                jac_TT = (1.0 / dt) * self.jac_T_accum
+                jac_TP = None
+            else:
+                jac_TT = (1.0 / dt) * self.jac_T_accum + jac_T_conv + jac_T_cond
+                jac_TP = jac_T_darcy
         
             shape_c = c.shape
             shape_p = p.shape + (1,)
@@ -1300,10 +1317,14 @@ class MembraneReactor:
                 jac_pT, (shape_p, shape_p), shape_cpT, offset=(offset_p, offset_T)
             )
             jac_TT = update_csc_array_indices(jac_TT, shape_p, shape_cpT, offset=offset_T)
-            jac_TP = update_csc_array_indices(
-                jac_TP, shape_p, shape_cpT, offset=(offset_T, offset_p)
-            )
-            self._jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT + jac_TP
+            if jac_TP is not None:
+                jac_TP = update_csc_array_indices(
+                    jac_TP, shape_p, shape_cpT, offset=(offset_T, offset_p)
+                )
+                self._jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT + jac_TP
+            else:
+                # Isothermal mode: no temperature-pressure coupling
+                self._jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT
         else:
             c_tot = self.correlation.molar_density(y, T, p)
             g_react = self.factor_react * self.kinetics(c_ret * p_over_c_tot)
@@ -1316,17 +1337,27 @@ class MembraneReactor:
         g_ret = g_c[:, self.num_r_perm :, :]
         g_ret[...] += g_react
         g_p = self.factor_p * (c_tot - c_sum)
-        g_T = g_T_conv + g_T_cond
-        if T_old is not None:
-            g_T += (self.jac_T_accum @ ((T - T_old).reshape((-1, 1)) / dt)).reshape(
-                T.shape
+
+        # Temperature residual
+        if self.is_isothermal:
+            # In isothermal mode, constrain temperature to initial value
+            # g_T = (T - T_init) / dt -> T held constant
+            T_init = np.empty_like(T)
+            T_init[:, :self.num_r_perm] = self.T_perm_in
+            T_init[:, self.num_r_perm:] = self.T_ret_in
+            g_T = (T - T_init) / dt
+        else:
+            g_T = g_T_conv + g_T_cond
+            if T_old is not None:
+                g_T += (self.jac_T_accum @ ((T - T_old).reshape((-1, 1)) / dt)).reshape(
+                    T.shape
+                )
+            enthalpies = self.correlation.species_enthalpies(T_ret)
+            dH_react = np.sum(g_react * enthalpies, axis=-1)
+            g_T_ret = g_T[:, self.num_r_perm :]
+            g_T_ret[...] += (
+                dH_react * cp_inv_mat.data.reshape(T.shape)[:, self.num_r_perm :]
             )
-        enthalpies = self.correlation.species_enthalpies(T_ret)
-        dH_react = np.sum(g_react * enthalpies, axis=-1)
-        g_T_ret = g_T[:, self.num_r_perm :]
-        g_T_ret[...] += (
-            dH_react * cp_inv_mat.data.reshape(T.shape)[:, self.num_r_perm :]
-        )
         g[..., :-2] = g_c
         g[..., -2] = g_p
         g[..., -1] = g_T
@@ -1565,7 +1596,9 @@ class MembraneReactor:
         Re_ret = np.abs(rho_ret * self.dp * u_ret_i / visc_ret)
         Pr_ret = np.abs(visc_ret * cp_ret / lmbda_ret_rad[:, [0]])
         Nu_ret = self.Nu_ret(Re_ret, Pr_ret)
-        h_ret = Nu_ret * lmbda_ret_rad[:, [0]] / self.dp
+        # Add minimum heat transfer coefficient to avoid division by zero
+        h_min = 1.0  # W/(m^2 K) - natural convection lower bound
+        h_ret = np.maximum(Nu_ret * lmbda_ret_rad[:, [0]] / self.dp, h_min)
 
         d_tube = 2.0 * self.r_f_perm[-1]
         visc_perm = self.correlation.viscosity(y_perm_i, T_perm_i)
@@ -1574,7 +1607,7 @@ class MembraneReactor:
         Re_perm = np.abs(rho_perm * d_tube * u_perm_i / visc_perm)
         Pr_perm = np.abs(visc_perm * cp_perm / lmbda_perm_rad[:, [-1]])
         Nu_perm = self.Nu_perm(Re_perm, Pr_perm)
-        h_perm = Nu_perm * lmbda_perm_rad[:, [-1]] / d_tube
+        h_perm = np.maximum(Nu_perm * lmbda_perm_rad[:, [-1]] / d_tube, h_min)
 
         if self.nu == 1:
             resist_mem = (
@@ -1612,59 +1645,7 @@ class MembraneReactor:
 
         return g, jac_cond, cp_inv_mat
 
-    def _construct_g_T(self, T_old, dt, compute_jac=False):
-        """Combine accumulation, convection, conduction for temperature residual."""
-        T = self.cpT[..., -1]
-        g_conv, jac_conv = self._construct_g_T_conv(T, compute_jac=compute_jac)
-        g_cond, jac_cond, cp_inv_mat = self._construct_g_T_cond(T)
-        g = g_conv + g_cond
-        if T_old is not None:
-            g += (self.jac_T_accum @ ((T - T_old).reshape((-1, 1)) / dt)).reshape(
-                T.shape
-            )
-
-        if compute_jac:
-            self._jac_T = (1.0 / dt) * self.jac_T_accum + jac_conv + jac_cond
-        return g, self._jac_T, cp_inv_mat
-
-    def _solve_T(self, T_old, dt):
-        """Solve energy equation (if non-isothermal) including reaction heat.
-
-        Returns:
-            tuple: (updated_c_tot, success_flag)
-        """
-        cpT = self.cpT
-        T = self.cpT[..., -1]
-        c = cpT[..., :-2]
-        p = cpT[..., -2]
-        T_vec = T.ravel()
-        g_T, jac_T, cp_inv_mat = self._construct_g_T(T_old, dt, compute_jac=True)
-        c_ret = c[:, self.num_r_perm :, :]
-        T_ret = T[:, self.num_r_perm :]
-        g_T_ret = g_T[:, self.num_r_perm :]
-        p_partial = (
-            p[:, self.num_r_perm :, np.newaxis]
-            * c_ret
-            / np.sum(c_ret, axis=-1, keepdims=True)
-        )
-        rates = self.factor_react * self.kinetics(p_partial)
-        enthalpies = self.correlation.species_enthalpies(T_ret)
-        dH_react = np.sum(rates * enthalpies, axis=-1)
-        g_T_ret[...] += (
-            dH_react * cp_inv_mat.data.reshape(T.shape)[:, self.num_r_perm :]
-        )
-        dT = -sla.spsolve(jac_T, g_T.reshape((-1, 1)))
-        self.cnt_num_solves_T += 1
-
-        success = (np.linalg.norm(dT, ord=np.inf) < MAX_DT_PER_STEP) and (
-            np.all(T_vec + dT) > 0.0
-        )
-        if success:
-            T_vec[...] += dT
-        self.kinetics.set_T_and_p(T=self.cpT[..., -1][:, self.num_r_perm :])
-        return success
-
-    def _solve_cpT(self, c_old, T_old, dt, verbose=0, use_line_search=True):
+    def _solve_cpT(self, c_old, T_old, dt, verbose=0, use_line_search=False):
         """Newton/line-search solve for species concentrations.
 
         Args:
@@ -1742,6 +1723,14 @@ class MembraneReactor:
             else:
                 # Full Newton step (no line search)
                 cpT_vec[:] = cpT_vec + dcpT
+
+            # Enforce physical bounds to prevent NaN propagation
+            # Concentrations must be non-negative
+            cpT[..., :-2] = np.maximum(cpT[..., :-2], 1e-20)
+            # Temperature must be positive and within reasonable bounds
+            cpT[..., -1] = np.clip(cpT[..., -1], 200.0, 2000.0)
+            # Pressure must be positive
+            cpT[..., -2] = np.maximum(cpT[..., -2], 1e3)
 
             # Update velocity fields after step
             self._update_velocity_fields(p=cpT[..., -2])
@@ -1880,10 +1869,14 @@ class MembraneReactor:
         for i in range(num_timesteps):
             T_old = self.cpT[..., -1].copy()
             c_old = self.cpT[..., :-2].copy()
-            if use_adaptive_react:
-                is_converged = self._solve_adaptive_react(dt, c_old, T_old, **kwargs)
-            else:
-                is_converged = self._solve_adaptive_dt(dt, c_old, T_old, **kwargs)
+            # if use_adaptive_react:
+            #     is_converged = self._solve_adaptive_react(dt, c_old, T_old, **kwargs)
+            # else:
+            #     is_converged = self._solve_adaptive_dt(dt, c_old, T_old, **kwargs)
+            result = self._solve_step(c_old, T_old, dt)
+            num_iters = result.num_iterations
+            g_norm, g_p_norm = result.g_norm, result.g_p_norm
+            is_converged = result.converged
         return is_converged
 
     def _solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose=0):
