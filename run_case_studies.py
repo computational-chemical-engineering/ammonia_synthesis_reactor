@@ -131,9 +131,21 @@ def run_case_studies(csv_path="debug.csv"):
                 F_ret_in=F_ret_in,
                 F_perm_in=F_perm_in,
                 y_ret_in=y_ret_in,
-                is_counter_current=is_counter_current
+                is_counter_current=is_counter_current,
+                # Solver parameters for robust convergence
+                factor_p=1e6,  # Improves Jacobian conditioning
+                dt_init=1e-3,
+                dt_max=10.0,
+                dt_increase_factor=2.0,
+                adaptive_dt_threshold=0.9,
             )
-            reactor.solve()
+            converged = reactor.solve(
+                num_timesteps=500,
+                use_adaptive_dt=True,
+                steady_state_tol=1e-4,
+                verbose=1
+            )
+            print(f"Converged: {converged}, Newton solves: {reactor.cnt_num_solves_cpT}")
             # 5. Save Raw Data
             # Save configuration for reproducibility
             with open(os.path.join(out_dir, "config.json"), 'w') as f:
@@ -174,4 +186,4 @@ def run_case_studies(csv_path="debug.csv"):
             print(f"Case {case_id} failed: {e}")
 
 if __name__ == "__main__":
-    run_case_studies()
+    run_case_studies("case_studies.csv")
