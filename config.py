@@ -65,17 +65,23 @@ class ReactorConfig:
 
     # Solver settings
     dt: float = 1e6
+    dt_init: float = 1e-3
+    dt_min: float = 1e-6
+    dt_max: float = 1e3
+    dt_increase_factor: float = 2.0
+    dt_decrease_factor: float = 0.5
+    adaptive_dt_threshold: float = 0.5
     num_timesteps: int = 10
-    num_newton_iterations: int = 10
+    num_newton_iterations: int = 1
     num_pressure_iterations: int = 5
-    num_concentration_iterations: int = 1
+    num_concentration_iterations: int = 4
     num_timesteps_max: int = 1
     rtol: float = 1e-6
     atol: float = 0.0
     rtol_p: float = 1e-6
-    atol_p: float = 0.0
+    atol_p: float = 1e-6
     rtol_c: float = 0.0
-    atol_c: float = 0.0
+    atol_c: float = 1e-4
     ord_norm: int = 2
 
     # Continuation settings

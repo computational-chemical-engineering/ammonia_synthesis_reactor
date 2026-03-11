@@ -49,7 +49,10 @@ DEFAULTS = {
     "dt_decrease_factor": 0.5,  # Factor to decrease dt after poor convergence
     "adaptive_dt_threshold": 0.5,  # Residual reduction threshold for increasing dt
     "num_timesteps": 1,  # Number of time steps / outer iterations
-    "num_newton_iterations": 10,  # Maximum number of outer iterations
+    "num_newton_iterations": 1,  # Outer Newton iterations per pseudo-transient step.
+    # For pseudo-transient continuation, 1 is appropriate — the pseudo-transient
+    # term I/dt regularises the system so that num_concentration_iterations
+    # Newton steps are sufficient to take a stable step.
     "num_concentration_iterations": 4,  # Maximum number of inner iterations in concentration solver
     "rtol": 1e-6,  # Convergence relative tolerance for Newton's method
     "atol": 1e-4,  # Convergence absolute tolerance for Newton's method

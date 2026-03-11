@@ -724,6 +724,12 @@ class MembraneReactor:
         self.numjac = NumJac(shape_c_ret)
         self.numjac_p = NumJac(shape_p + (1,))
 
+        # Numerical Jacobians for thermochemical cross-coupling (non-isothermal)
+        shape_p_ret = self._shapes["p_ret"]
+        self.numjac_cT = NumJac(shape_in=shape_p_ret + (1,), shape_out=shape_c_ret)
+        self.numjac_Tc = NumJac(shape_in=shape_c_ret, shape_out=shape_p_ret + (1,))
+        self.numjac_TT_react = NumJac(shape_p_ret + (1,))
+
         # Summation matrix (concentration to total)
         self.sum_c = construct_coefficient_matrix(
             np.array([[[1.0]]]), shape=(shape_p + (1,), shape_c)
@@ -1299,6 +1305,8 @@ class MembraneReactor:
             jac_pc = -self.factor_p * self.sum_c
             jac_pT = self.factor_p * dc_tot_dT_mat
             # Handle isothermal mode: simplified temperature Jacobian
+            jac_cT_ret = None
+            jac_Tc_ret = None
             if self.is_isothermal:
                 # Pin temperature to initial value: g_T = T - T_init = 0
                 jac_TT = (1.0 / dt) * self.jac_T_accum
@@ -1306,7 +1314,63 @@ class MembraneReactor:
             else:
                 jac_TT = (1.0 / dt) * self.jac_T_accum + jac_T_conv + jac_T_cond
                 jac_TP = jac_T_darcy
-        
+
+                # === Thermochemical coupling blocks ===
+                enthalpies = self.correlation.species_enthalpies(T_ret)
+                cp_inv = cp_inv_mat.data.reshape(T.shape)[:, self.num_r_perm:]
+                shape_T_ret_loc = (self.num_z, self.num_r_ret, 1)
+
+                # Task 1 (J_cT): d(g_react)/d(T_ret)
+                # Maps T_ret perturbations → concentration residual changes
+                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                _, jac_cT_ret = self.numjac_cT(
+                    lambda T_var: self.factor_react * self.kinetics(
+                        c_ret * p_over_c_tot, T_var[..., 0]
+                    ),
+                    T_ret[..., np.newaxis],
+                )
+
+                # Task 2 (J_Tc): d(heat_source)/d(c_ret)
+                # Maps concentration perturbations → temperature residual changes
+                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                _, jac_Tc_ret = self.numjac_Tc(
+                    lambda c_var: (
+                        np.sum(
+                            self.factor_react
+                            * self.kinetics(c_var * p_over_c_tot)
+                            * enthalpies,
+                            axis=-1,
+                        )
+                        * cp_inv
+                    )[..., np.newaxis],
+                    c_ret,
+                )
+
+                # Task 3 (J_TT_react): d(heat_source)/d(T_ret)
+                # Adds Arrhenius temperature sensitivity to jac_TT
+                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                _, jac_TT_react_ret = self.numjac_TT_react(
+                    lambda T_var: (
+                        np.sum(
+                            self.factor_react
+                            * self.kinetics(c_ret * p_over_c_tot, T_var[..., 0])
+                            * self.correlation.species_enthalpies(T_var[..., 0]),
+                            axis=-1,
+                        )
+                        * cp_inv
+                    )[..., np.newaxis],
+                    T_ret[..., np.newaxis],
+                )
+                # Map J_TT_react from retentate-T space to full-T space and add
+                jac_TT += update_csc_array_indices(
+                    jac_TT_react_ret,
+                    shape_T_ret_loc,
+                    (self.num_z, self.num_r, 1),
+                    offset=(0, self.num_r_perm, 0),
+                )
+                # Restore kinetics to current (c_ret, T_ret) after all FD sweeps
+                self.kinetics(c_ret * p_over_c_tot, T_ret)
+
             shape_c = c.shape
             shape_p = p.shape + (1,)
             offset_p = (0,) * (c.ndim - 1) + (shape_c[-1],)
@@ -1323,17 +1387,40 @@ class MembraneReactor:
                 jac_pT, (shape_p, shape_p), shape_cpT, offset=(offset_p, offset_T)
             )
             jac_TT = update_csc_array_indices(jac_TT, shape_p, shape_cpT, offset=offset_T)
+            # Task 4: map thermochemical blocks to cpT space and add to assembly
+            if jac_cT_ret is not None:
+                shape_c_ret_loc = (self.num_z, self.num_r_ret, self.num_c)
+                shape_T_ret_loc = (self.num_z, self.num_r_ret, 1)
+                offset_c_ret = (0, self.num_r_perm, 0)
+                offset_T_ret = (0, self.num_r_perm, self.num_c + 1)
+                jac_cT = update_csc_array_indices(
+                    jac_cT_ret,
+                    (shape_c_ret_loc, shape_T_ret_loc),
+                    shape_cpT,
+                    offset=(offset_c_ret, offset_T_ret),
+                )
+                jac_Tc = update_csc_array_indices(
+                    jac_Tc_ret,
+                    (shape_T_ret_loc, shape_c_ret_loc),
+                    shape_cpT,
+                    offset=(offset_T_ret, offset_c_ret),
+                )
+            else:
+                jac_cT = jac_Tc = None
+
+            base_jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT
             if jac_TP is not None:
                 jac_TP = update_csc_array_indices(
                     jac_TP, shape_p, shape_cpT, offset=(offset_T, offset_p)
                 )
-                self._jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT + jac_TP
-            else:
-                # Isothermal mode: no temperature-pressure coupling
-                self._jac = jac_cc + jac_pp + jac_cp + jac_pc + jac_pT + jac_TT
+                base_jac = base_jac + jac_TP
+            if jac_cT is not None:
+                base_jac = base_jac + jac_cT + jac_Tc
+            self._jac = base_jac
         else:
             c_tot = self.correlation.molar_density(y, T, p)
-            g_react = self.factor_react * self.kinetics(c_ret * p_over_c_tot)
+            # Pass T_ret explicitly so kinetics always uses the current temperature
+            g_react = self.factor_react * self.kinetics(c_ret * p_over_c_tot, T_ret)
 
         g_c = self.g_c_in.reshape(c.shape) + g_conv + g_diff
         if c_old is not None:
@@ -1698,7 +1785,16 @@ class MembraneReactor:
                 g_p_norm_init = g_p_norm
 
             # Compute Newton step
-            dcpT = -sla.spsolve(jac, g.reshape((-1, 1)))
+            try:
+                dcpT = -sla.spsolve(jac, g.reshape((-1, 1)))
+            except RuntimeError:
+                # Factorization failure (singular/ill-conditioned Jacobian).
+                # Return inf so the outer loop treats this as divergence
+                # and reduces dt.
+                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
+            # MatrixRankWarning path: spsolve may return NaN without raising.
+            if not np.all(np.isfinite(dcpT)):
+                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
             self.cnt_num_solves_cpT += 1
 
             # Apply step with optional line search
@@ -1883,10 +1979,23 @@ class MembraneReactor:
         dt_decrease = getattr(self, 'dt_decrease_factor', 0.5)
         threshold = getattr(self, 'adaptive_dt_threshold', 0.5)
 
-        g_norm_prev = None
+        g_ss_norm_prev = None
+        g_ss_norm_0 = None   # initial SS residual, used for relative convergence
         g_ss_norm = None
+        g_ss_norm_best = None   # lowest g_ss seen — best physical state
+        cpT_best = None
         is_converged = False
         consecutive_good_steps = 0
+        n_increasing = 0        # consecutive steps with g_ss growing
+
+        # Compute baseline SS residual before any steps.
+        # Used to detect if a first accepted step produced a corrupted state
+        # (e.g. when dt_init is too large and the Newton step jumps to a
+        # non-physical region without producing NaN).
+        g_baseline, _ = self._construct_g_cpT(
+            self.cpT[..., :-2].copy(), self.cpT[..., -1].copy(), 1e10, compute_jac=False
+        )
+        g_ss_norm_baseline = np.linalg.norm(g_baseline)
 
         if verbose >= 1:
             print(f"Starting adaptive dt solve: dt_init={dt_init:.2e}, "
@@ -1901,73 +2010,121 @@ class MembraneReactor:
             result = self._solve_step(c_old, T_old, dt)
             g_norm = result.g_norm
 
-            # Check for NaN or divergence
-            if not np.isfinite(g_norm) or (g_norm_prev is not None and g_norm > 10 * g_norm_prev):
-                # Reject step, restore state, decrease dt
+            # --- Reject if factorization/NaN failure (g_norm=inf) ---
+            if not np.isfinite(g_norm):
                 self.cpT = cpT_backup
                 self._update_velocity_fields(self.cpT[..., -2])
                 dt = max(dt * dt_decrease, dt_min)
                 consecutive_good_steps = 0
                 if verbose >= 2:
-                    print(f"  Step {i}: REJECTED (divergence), dt -> {dt:.2e}")
+                    print(f"  Step {i}: REJECTED (NaN/singular), dt -> {dt:.2e}")
                 continue
 
             # Compute actual steady-state residual (without transient term)
-            # This is the residual with dt -> infinity
+            # dt=1e10 makes the transient term (c-c_old)/dt negligible.
             c_new = self.cpT[..., :-2]
             T_new = self.cpT[..., -1]
             g_ss, _ = self._construct_g_cpT(c_new.copy(), T_new.copy(), 1e10, compute_jac=False)
             g_ss_norm = np.linalg.norm(g_ss)
 
-            # Check steady-state convergence (residual relative to solution)
-            cpT_norm = np.linalg.norm(self.cpT)
-            rel_residual = g_ss_norm / cpT_norm if cpT_norm > 0 else g_ss_norm
+            # --- Reject if SS residual increased dramatically ---
+            # Use baseline (pre-loop) norm when no prior accepted step exists,
+            # so that a first step that jumps to a non-physical state is caught.
+            g_ss_norm_ref = g_ss_norm_prev if g_ss_norm_prev is not None else g_ss_norm_baseline
+            if g_ss_norm > 10 * g_ss_norm_ref:
+                self.cpT = cpT_backup
+                self._update_velocity_fields(self.cpT[..., -2])
+                dt = max(dt * dt_decrease, dt_min)
+                consecutive_good_steps = 0
+                n_increasing = 0
+                if verbose >= 2:
+                    print(f"  Step {i}: REJECTED (g_ss grew), dt -> {dt:.2e}, "
+                          f"||g_ss||={g_ss_norm:.2e}")
+                continue
+
+            # Track best state so far (lowest g_ss)
+            if g_ss_norm_best is None or g_ss_norm < g_ss_norm_best:
+                g_ss_norm_best = g_ss_norm
+                cpT_best = self.cpT.copy()
+
+            # Record initial SS norm once (after first accepted step)
+            if g_ss_norm_0 is None:
+                g_ss_norm_0 = max(g_ss_norm, 1e-30)
+
+            # Check steady-state convergence: relative reduction from initial residual
+            rel_residual = g_ss_norm / g_ss_norm_0
 
             if rel_residual < steady_state_tol:
                 is_converged = True
                 if verbose >= 1:
                     print(f"  Step {i}: CONVERGED to steady state, dt={dt:.2e}, "
-                          f"||g_ss||={g_ss_norm:.2e}, ||g_ss||/||x||={rel_residual:.2e}")
+                          f"||g_ss||={g_ss_norm:.2e}, ||g_ss||/||g_ss_0||={rel_residual:.2e}")
                 break
 
             # Adapt dt based on steady-state residual progress
-            if use_adaptive_dt and g_norm_prev is not None:
-                reduction = g_ss_norm / g_norm_prev
+            if use_adaptive_dt and g_ss_norm_prev is not None:
+                reduction = g_ss_norm / g_ss_norm_prev
 
-                if reduction < threshold:
-                    # Good progress - increase dt
+                if reduction > 1.05:
+                    # Residual growing fast - reduce dt significantly.
+                    dt = max(dt * dt_decrease, dt_min)
+                    consecutive_good_steps = 0
+                    n_increasing += 1
+                    if verbose >= 2:
+                        print(f"  Step {i}: poor (red={reduction:.2f}), dt -> {dt:.2e}, "
+                              f"||g_ss||={g_ss_norm:.2e}")
+                elif reduction > 1.0:
+                    # Residual drifting upward by a small amount.
+                    # Keep dt; track growth so the restore trigger fires after
+                    # 10 consecutive drifting steps (catches the 1%/step divergence
+                    # that the old 0.98-1.05 "stalled" window allowed silently).
+                    consecutive_good_steps = 0
+                    n_increasing += 1
+                    if verbose >= 2:
+                        print(f"  Step {i}: drift (red={reduction:.2f}), dt={dt:.2e}, "
+                              f"||g_ss||={g_ss_norm:.2e}")
+                elif reduction < threshold:
+                    # Good reduction - increase dt after 2 consecutive good steps.
                     consecutive_good_steps += 1
+                    n_increasing = 0
                     if consecutive_good_steps >= 2:
                         dt = min(dt * dt_increase, dt_max)
                         consecutive_good_steps = 0
                     if verbose >= 2:
-                        print(f"  Step {i}: good (red={reduction:.2f}), dt -> {dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
-                elif reduction > 1.5:
-                    # Residual increased significantly - decrease dt
-                    dt = max(dt * dt_decrease, dt_min)
-                    consecutive_good_steps = 0
-                    if verbose >= 2:
-                        print(f"  Step {i}: poor (red={reduction:.2f}), dt -> {dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
-                elif reduction > 0.98:
-                    # Progress stalled - try increasing dt to make larger steps
-                    # Near steady state, larger dt means bigger steps toward equilibrium
-                    consecutive_good_steps += 1
-                    if consecutive_good_steps >= 3:
-                        dt = min(dt * dt_increase, dt_max)
-                        consecutive_good_steps = 0
-                        if verbose >= 2:
-                            print(f"  Step {i}: stalled, increasing dt -> {dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
-                    elif verbose >= 2:
-                        print(f"  Step {i}: slow (red={reduction:.2f}), dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+                        print(f"  Step {i}: good (red={reduction:.2f}), dt -> {dt:.2e}, "
+                              f"||g_ss||={g_ss_norm:.2e}")
                 else:
-                    # Modest progress - keep dt
+                    # threshold <= reduction <= 1.0: slow but steady progress.
+                    # Keep dt to avoid overstepping with an incomplete Jacobian.
                     consecutive_good_steps = 0
+                    n_increasing = 0
                     if verbose >= 2:
-                        print(f"  Step {i}: ok (red={reduction:.2f}), dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+                        print(f"  Step {i}: ok (red={reduction:.2f}), dt={dt:.2e}, "
+                              f"||g_ss||={g_ss_norm:.2e}")
+
+                # If consistently drifting away from best, restore best state.
+                if n_increasing >= 10 and cpT_best is not None:
+                    self.cpT = cpT_best.copy()
+                    self._update_velocity_fields(self.cpT[..., -2])
+                    g_ss_norm = g_ss_norm_best
+                    g_ss_norm_prev = g_ss_norm_best
+                    n_increasing = 0
+                    if verbose >= 2:
+                        print(f"  Step {i}: Restored best state, "
+                              f"||g_ss||={g_ss_norm:.2e}")
             elif verbose >= 2:
                 print(f"  Step {i}: dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
 
-            g_norm_prev = g_ss_norm
+            g_ss_norm_prev = g_ss_norm
+
+        # Always restore the best (lowest g_ss) state found, even if the final
+        # state drifted away from it after the minimum.
+        if cpT_best is not None and (g_ss_norm is None or g_ss_norm_best < g_ss_norm):
+            self.cpT = cpT_best
+            self._update_velocity_fields(self.cpT[..., -2])
+            g_ss_norm = g_ss_norm_best
+            if verbose >= 1:
+                print(f"  Restored best state: ||g_ss_best||={g_ss_norm_best:.2e}")
 
         if verbose >= 1 and not is_converged:
             print(f"  Did not converge after {num_timesteps} steps, "
