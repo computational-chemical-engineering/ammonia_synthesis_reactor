@@ -184,21 +184,18 @@ class MembraneReactor:
         # Try config first, then mesh
         try:
             config = object.__getattribute__(self, "_config")
-            if hasattr(config, name):
-                return getattr(config, name)
+            return getattr(config, name)
         except AttributeError:
             pass
 
         try:
             mesh = object.__getattribute__(self, "_mesh")
-            if hasattr(mesh, name):
-                return getattr(mesh, name)
+            return getattr(mesh, name)
         except AttributeError:
             pass
+        
+        return object.__getattribute__(self, name)
 
-        raise AttributeError(
-            f"'{type(self).__name__}' has no attribute '{name}'"
-        )
 
     def _init_config(self, config_file, kwargs):
         """Load and merge configuration from defaults, file, and kwargs.
@@ -1078,13 +1075,15 @@ class MembraneReactor:
         if c is None:
             c = self.cpT[..., :-2]
 
-        # Determine retentate axial BCs with inflow adjustment for reverse flow
+        # Determine retentate axial BCs with inflow adjustment for reverse flow.
+        # Use a local copy so get_axial_bcs_for_flow does not mutate self.u_ret_ax.
         inflow_conc = (
             self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
         )
+        u_ret_ax_local = self.u_ret_ax.copy()
         bc_ret_ax = get_axial_bcs_for_flow(
             is_counter_current=self.is_counter_current,
-            u_ax=self.u_ret_ax,
+            u_ax=u_ret_ax_local,
             bc_inlet=self.BC_NONE,
             inflow_value=inflow_conc,
         )
@@ -1123,9 +1122,9 @@ class MembraneReactor:
         flux_perm_rad = u_perm_rad * c_perm_rad
         g_vect[:] += self.div_c_perm_rad @ flux_perm_rad.ravel()
 
-        # Retentate region convection
+        # Retentate region convection (use local copy which may have outlet zeroed)
         c_ret = c[:, self.num_r_perm :, :]
-        u_ret_ax = self.u_ret_ax[..., np.newaxis]
+        u_ret_ax = u_ret_ax_local[..., np.newaxis]
         u_ret_rad = self.u_ret_rad[..., np.newaxis]
         bc_ret_rad = (self.BC_NEUMANN_HOM, self.BC_NEUMANN_HOM)
 
@@ -1470,11 +1469,13 @@ class MembraneReactor:
         bc_ret_dirichlet = make_dirichlet_bc(self.T_ret_in)
         bc_perm_dirichlet = make_dirichlet_bc(self.T_perm_in)
 
-        # Determine retentate axial BCs with inflow adjustment for reverse flow
+        # Determine retentate axial BCs with inflow adjustment for reverse flow.
+        # Use a local copy so get_axial_bcs_for_flow does not mutate self.u_ret_ax.
         inflow_T = self.T_ret_in  # scalar for temperature
+        u_ret_ax_local = self.u_ret_ax.copy()
         bc_ret_ax = get_axial_bcs_for_flow(
             is_counter_current=self.is_counter_current,
-            u_ax=self.u_ret_ax,
+            u_ax=u_ret_ax_local,
             bc_inlet=bc_ret_dirichlet,
             inflow_value=inflow_T,
         )
@@ -1512,11 +1513,11 @@ class MembraneReactor:
             self.z_f,
             self.z_c,
             bc=bc_ret_ax,
-            v=self.u_ret_ax,
+            v=u_ret_ax_local,
             tvd_limiter=upwind,
             axis=0,
         )
-        flux_ret_ax = self.u_ret_ax * T_ret_ax
+        flux_ret_ax = u_ret_ax_local * T_ret_ax
         g_vect[:] += self.div_p_ret_ax @ flux_ret_ax.ravel()
         T_ret_rad, _ = interp_cntr_to_stagg_tvd(
             T_ret,
@@ -1567,7 +1568,7 @@ class MembraneReactor:
             jac_darcy_div += self.div_p_perm_rad @ (self.k_matrix_perm_rad @ self.grad_p_perm_rad)
 
             conv_matrix_ret_ax, _ = construct_convflux_upwind(
-                T_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=self.u_ret_ax, axis=0
+                T_ret.shape, self.z_f, self.z_c, bc=bc_ret_ax, v=u_ret_ax_local, axis=0
             )
             jac_ret = self.div_p_ret_ax @ conv_matrix_ret_ax
             
@@ -1973,7 +1974,7 @@ class MembraneReactor:
 
         self.cnt_num_solves_cpT = 0
         dt = dt_init
-        dt_min = getattr(self, 'dt_min', 1e-6)
+        dt_min = getattr(self, 'dt_min', 1e-16)
         dt_max = getattr(self, 'dt_max', 1e3)
         dt_increase = getattr(self, 'dt_increase_factor', 2.0)
         dt_decrease = getattr(self, 'dt_decrease_factor', 0.5)
@@ -1995,7 +1996,7 @@ class MembraneReactor:
         g_baseline, _ = self._construct_g_cpT(
             self.cpT[..., :-2].copy(), self.cpT[..., -1].copy(), 1e10, compute_jac=False
         )
-        g_ss_norm_baseline = np.linalg.norm(g_baseline)
+        g_ss_norm_baseline  = np.linalg.norm(g_baseline)
 
         if verbose >= 1:
             print(f"Starting adaptive dt solve: dt_init={dt_init:.2e}, "
@@ -2013,6 +2014,7 @@ class MembraneReactor:
             # --- Reject if factorization/NaN failure (g_norm=inf) ---
             if not np.isfinite(g_norm):
                 self.cpT = cpT_backup
+                self._construct_darcy_matrices()
                 self._update_velocity_fields(self.cpT[..., -2])
                 dt = max(dt * dt_decrease, dt_min)
                 consecutive_good_steps = 0
@@ -2022,17 +2024,19 @@ class MembraneReactor:
 
             # Compute actual steady-state residual (without transient term)
             # dt=1e10 makes the transient term (c-c_old)/dt negligible.
-            c_new = self.cpT[..., :-2]
-            T_new = self.cpT[..., -1]
-            g_ss, _ = self._construct_g_cpT(c_new.copy(), T_new.copy(), 1e10, compute_jac=False)
+            # Note: _construct_g_cpT reads self.cpT directly for concentrations/pressure/T;
+            # the c_old/T_old args only affect the negligible transient term at dt=1e10.
+            g_ss, _ = self._construct_g_cpT(c_old, T_old, 1e10, compute_jac=False)
             g_ss_norm = np.linalg.norm(g_ss)
 
-            # --- Reject if SS residual increased dramatically ---
-            # Use baseline (pre-loop) norm when no prior accepted step exists,
-            # so that a first step that jumps to a non-physical state is caught.
-            g_ss_norm_ref = g_ss_norm_prev if g_ss_norm_prev is not None else g_ss_norm_baseline
-            if g_ss_norm > 10 * g_ss_norm_ref:
+            # --- Reject if SS residual increased dramatically vs previous accepted step ---
+            # Do NOT compare against baseline for step 0: the baseline is computed with
+            # cold (un-warmed) velocity fields, while after _solve_step the velocity fields
+            # have been updated by many Picard steps. These are incomparable measurements
+            # and the comparison causes spurious step-0 rejection even for tiny dt.
+            if g_ss_norm_prev is not None and g_ss_norm > 10 * g_ss_norm_prev:
                 self.cpT = cpT_backup
+                self._construct_darcy_matrices()
                 self._update_velocity_fields(self.cpT[..., -2])
                 dt = max(dt * dt_decrease, dt_min)
                 consecutive_good_steps = 0

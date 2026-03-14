@@ -75,13 +75,11 @@ def get_axial_bcs_for_flow(
         # Check for reverse flow at outlet (z=0)
         is_inflow = u_ax[0, :] > 0
         if np.any(is_inflow) and inflow_value is not None:
-            # b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
-            # a_out = 1.0 - b_out
-            # d_out = b_out * inflow_value
-            b_out = 0
-            d_out = 0
-            a_out = (~is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
-            u_ax[0, is_inflow] = 0
+            # Use Dirichlet BC (inflow_value) for reverse-flow cells,
+            # and homogeneous Neumann for forward-flow cells.
+            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            a_out = 1.0 - b_out
+            d_out = b_out * inflow_value
             bc_left = {"a": a_out, "b": b_out, "d": d_out}
         else:
             bc_left = {"a": 1.0, "b": 0, "d": 0}
@@ -91,13 +89,11 @@ def get_axial_bcs_for_flow(
         # Check for reverse flow at outlet (z=L)
         is_inflow = u_ax[-1, :] < 0
         if np.any(is_inflow) and inflow_value is not None:
-#            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
-#            a_out = 1.0 - b_out
-#            d_out = b_out * inflow_value
-            b_out = 0
-            d_out = 0
-            a_out = (~is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
-            u_ax[-1, is_inflow] = 0
+            # Use Dirichlet BC (inflow_value) for reverse-flow cells,
+            # and homogeneous Neumann for forward-flow cells.
+            b_out = (is_inflow * 1.0).reshape((1, -1) + (1,) * extra_dims)
+            a_out = 1.0 - b_out
+            d_out = b_out * inflow_value
             bc_right = {"a": a_out, "b": b_out, "d": d_out}
         else:
             bc_right = {"a": 1.0, "b": 0, "d": 0}
