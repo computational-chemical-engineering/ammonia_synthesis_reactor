@@ -259,6 +259,15 @@ class MembraneReactor:
             num_species=self.num_c,
         )
 
+        # Inflow composition used when backward flow occurs at the retentate outlet.
+        # Nearly pure N2 with a trace of NH3 to prevent kinetics singularities.
+        _nh3_trace = 1e-4  # mole fraction
+        self.inflow_conc_ret_backflow = (
+            self.p_ret_out
+            / (self.Rg * self.T_ret_in)
+            * np.array([[[0.0, 1.0 - _nh3_trace, _nh3_trace]]])
+        )
+
         rho_g = self.correlation.density(
             self.y_ret_init, self.T_ret_init, self.p_ret_out
         )  # Gas density [kg/m³]
@@ -1077,15 +1086,12 @@ class MembraneReactor:
 
         # Determine retentate axial BCs with inflow adjustment for reverse flow.
         # Use a local copy so get_axial_bcs_for_flow does not mutate self.u_ret_ax.
-        inflow_conc = (
-            self.p_ret_out / (self.Rg * self.T_ret_in) * np.array([[[0.0, 1.0, 0.0]]])
-        )
         u_ret_ax_local = self.u_ret_ax.copy()
         bc_ret_ax = get_axial_bcs_for_flow(
             is_counter_current=self.is_counter_current,
             u_ax=u_ret_ax_local,
             bc_inlet=self.BC_NONE,
-            inflow_value=inflow_conc,
+            inflow_value=self.inflow_conc_ret_backflow,
         )
 
         g = np.empty(c.shape)
@@ -2481,10 +2487,16 @@ class MembraneReactor:
         if c is None:
             c = self.cpT[..., :-2]
 
-        if self.is_counter_current:
-            bc_ret_ax = (self.BC_NEUMANN_HOM, self.BC_NONE)
-        else:
-            bc_ret_ax = (self.BC_NONE, self.BC_NEUMANN_HOM)
+        # Use the same backward-flow BC as _construct_g_c so that compute_flows
+        # diagnostics are consistent with the residual: backward-flow outlet cells
+        # receive self.inflow_conc_ret_backflow, not the extrapolated interior value.
+        u_ret_ax_local = self.u_ret_ax.copy()
+        bc_ret_ax = get_axial_bcs_for_flow(
+            is_counter_current=self.is_counter_current,
+            u_ax=u_ret_ax_local,
+            bc_inlet=self.BC_NONE,
+            inflow_value=self.inflow_conc_ret_backflow,
+        )
 
         c_perm = c[:, 0 : self.num_r_perm, :]
         u_perm_ax = self.u_perm_ax[..., np.newaxis]
@@ -2511,7 +2523,7 @@ class MembraneReactor:
         fluxes_perm_rad = u_perm_rad * c_perm_rad
 
         c_ret = c[:, self.num_r_perm :, :]
-        u_ret_ax = self.u_ret_ax[..., np.newaxis]
+        u_ret_ax = u_ret_ax_local[..., np.newaxis]
         u_ret_rad = self.u_ret_rad[..., np.newaxis]
         c_ret_ax, _ = interp_cntr_to_stagg_tvd(
             c_ret,
