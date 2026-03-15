@@ -1946,6 +1946,8 @@ class MembraneReactor:
         dt_init: Optional[float] = None,
         use_adaptive_dt: bool = True,
         steady_state_tol: float = 1e-3,
+        n_plateau_required: int = 20,
+        plateau_tol: float = 0.02,
         verbose: int = 0,
         **kwargs: Any,
     ) -> bool:
@@ -1986,8 +1988,8 @@ class MembraneReactor:
         g_ss_norm_best = None   # lowest g_ss seen — best physical state
         cpT_best = None
         is_converged = False
-        consecutive_good_steps = 0
         n_increasing = 0        # consecutive steps with g_ss growing
+        n_plateau_steps = 0     # consecutive steps where |reduction-1| < plateau_tol
 
         # Compute baseline SS residual before any steps.
         # Used to detect if a first accepted step produced a corrupted state
@@ -2017,7 +2019,7 @@ class MembraneReactor:
                 self._construct_darcy_matrices()
                 self._update_velocity_fields(self.cpT[..., -2])
                 dt = max(dt * dt_decrease, dt_min)
-                consecutive_good_steps = 0
+                n_plateau_steps = 0
                 if verbose >= 2:
                     print(f"  Step {i}: REJECTED (NaN/singular), dt -> {dt:.2e}")
                 continue
@@ -2039,8 +2041,8 @@ class MembraneReactor:
                 self._construct_darcy_matrices()
                 self._update_velocity_fields(self.cpT[..., -2])
                 dt = max(dt * dt_decrease, dt_min)
-                consecutive_good_steps = 0
                 n_increasing = 0
+                n_plateau_steps = 0
                 if verbose >= 2:
                     print(f"  Step {i}: REJECTED (g_ss grew), dt -> {dt:.2e}, "
                           f"||g_ss||={g_ss_norm:.2e}")
@@ -2055,56 +2057,45 @@ class MembraneReactor:
             if g_ss_norm_0 is None:
                 g_ss_norm_0 = max(g_ss_norm, 1e-30)
 
-            # Check steady-state convergence: relative reduction from initial residual
-            rel_residual = g_ss_norm / g_ss_norm_0
-
-            if rel_residual < steady_state_tol:
-                is_converged = True
-                if verbose >= 1:
-                    print(f"  Step {i}: CONVERGED to steady state, dt={dt:.2e}, "
-                          f"||g_ss||={g_ss_norm:.2e}, ||g_ss||/||g_ss_0||={rel_residual:.2e}")
-                break
-
-            # Adapt dt based on steady-state residual progress
+            # Adapt dt based on steady-state residual progress, and track plateau
             if use_adaptive_dt and g_ss_norm_prev is not None:
                 reduction = g_ss_norm / g_ss_norm_prev
 
                 if reduction > 1.05:
-                    # Residual growing fast - reduce dt significantly.
+                    # Residual growing fast — reduce dt.
                     dt = max(dt * dt_decrease, dt_min)
-                    consecutive_good_steps = 0
                     n_increasing += 1
                     if verbose >= 2:
                         print(f"  Step {i}: poor (red={reduction:.2f}), dt -> {dt:.2e}, "
                               f"||g_ss||={g_ss_norm:.2e}")
                 elif reduction > 1.0:
-                    # Residual drifting upward by a small amount.
-                    # Keep dt; track growth so the restore trigger fires after
-                    # 10 consecutive drifting steps (catches the 1%/step divergence
-                    # that the old 0.98-1.05 "stalled" window allowed silently).
-                    consecutive_good_steps = 0
+                    # Residual drifting upward slightly — hold dt.
                     n_increasing += 1
                     if verbose >= 2:
                         print(f"  Step {i}: drift (red={reduction:.2f}), dt={dt:.2e}, "
                               f"||g_ss||={g_ss_norm:.2e}")
                 elif reduction < threshold:
-                    # Good reduction - increase dt after 2 consecutive good steps.
-                    consecutive_good_steps += 1
+                    # Good reduction — increase dt aggressively (dt_increase²).
+                    dt = min(dt * dt_increase ** 2, dt_max)
                     n_increasing = 0
-                    if consecutive_good_steps >= 2:
-                        dt = min(dt * dt_increase, dt_max)
-                        consecutive_good_steps = 0
                     if verbose >= 2:
                         print(f"  Step {i}: good (red={reduction:.2f}), dt -> {dt:.2e}, "
                               f"||g_ss||={g_ss_norm:.2e}")
                 else:
-                    # threshold <= reduction <= 1.0: slow but steady progress.
-                    # Keep dt to avoid overstepping with an incomplete Jacobian.
-                    consecutive_good_steps = 0
+                    # threshold ≤ reduction ≤ 1.0 — moderate progress, increase dt normally.
+                    dt = min(dt * dt_increase, dt_max)
                     n_increasing = 0
                     if verbose >= 2:
-                        print(f"  Step {i}: ok (red={reduction:.2f}), dt={dt:.2e}, "
+                        print(f"  Step {i}: ok (red={reduction:.2f}), dt -> {dt:.2e}, "
                               f"||g_ss||={g_ss_norm:.2e}")
+
+                # Track plateau: sole authority on n_plateau_steps.
+                # |reduction - 1| < plateau_tol means the residual is essentially
+                # stationary — the Picard fixed point has been reached.
+                if abs(reduction - 1.0) < plateau_tol:
+                    n_plateau_steps += 1
+                else:
+                    n_plateau_steps = 0
 
                 # If consistently drifting away from best, restore best state.
                 if n_increasing >= 10 and cpT_best is not None:
@@ -2113,11 +2104,33 @@ class MembraneReactor:
                     g_ss_norm = g_ss_norm_best
                     g_ss_norm_prev = g_ss_norm_best
                     n_increasing = 0
+                    n_plateau_steps = 0
                     if verbose >= 2:
                         print(f"  Step {i}: Restored best state, "
                               f"||g_ss||={g_ss_norm:.2e}")
             elif verbose >= 2:
                 print(f"  Step {i}: dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
+
+            # Check steady-state convergence.
+            rel_residual = g_ss_norm / g_ss_norm_0
+
+            # Relative-reduction criterion — only valid once dt is in the large-dt regime,
+            # to prevent false convergence while the pseudo-transient term still dominates.
+            if rel_residual < steady_state_tol and dt >= 0.1 * dt_max:
+                is_converged = True
+                if verbose >= 1:
+                    print(f"  Step {i}: CONVERGED, dt={dt:.2e}, "
+                          f"||g_ss||={g_ss_norm:.2e}, ||g_ss||/||g_ss_0||={rel_residual:.2e}")
+                break
+
+            # Plateau criterion — Picard fixed point: best achievable with one Picard
+            # step per Newton iteration. Declare convergence once stable at large dt.
+            if n_plateau_steps >= n_plateau_required and dt >= 0.1 * dt_max:
+                is_converged = True
+                if verbose >= 1:
+                    print(f"  Step {i}: CONVERGED (Picard plateau), dt={dt:.2e}, "
+                          f"||g_ss||={g_ss_norm:.2e}")
+                break
 
             g_ss_norm_prev = g_ss_norm
 

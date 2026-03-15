@@ -44,7 +44,7 @@ DEFAULTS = {
     "dt": 1e7,  # Time step size (used as dt_max when adaptive dt is enabled)
     "dt_init": 1e-3,  # Initial time step for adaptive dt
     "dt_min": 1e-6,  # Minimum time step
-    "dt_max": 1e3,  # Maximum time step
+    "dt_max": 1e7,  # Maximum time step
     "dt_increase_factor": 2.0,  # Factor to increase dt after good convergence
     "dt_decrease_factor": 0.5,  # Factor to decrease dt after poor convergence
     "adaptive_dt_threshold": 0.5,  # Residual reduction threshold for increasing dt
