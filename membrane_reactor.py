@@ -1314,7 +1314,7 @@ class MembraneReactor:
             jac_Tc_ret = None
             if self.is_isothermal:
                 # Pin temperature to initial value: g_T = T - T_init = 0
-                jac_TT = (1.0 / dt) * self.jac_T_accum
+                jac_TT = self.jac_T_accum
                 jac_TP = None
             else:
                 jac_TT = (1.0 / dt) * self.jac_T_accum + jac_T_conv + jac_T_cond
@@ -1443,7 +1443,7 @@ class MembraneReactor:
             T_init = np.empty_like(T)
             T_init[:, :self.num_r_perm] = self.T_perm_in
             T_init[:, self.num_r_perm:] = self.T_ret_in
-            g_T = (T - T_init) / dt
+            g_T = (T - T_init)
         else:
             g_T = g_T_conv + g_T_cond
             if T_old is not None:
@@ -1838,9 +1838,9 @@ class MembraneReactor:
             # Note: Concentrations are allowed to go negative during Newton iterations
             # The kinetics use safe power functions that handle negative values
             # Temperature must be positive and within reasonable bounds
-            cpT[..., -1] = np.clip(cpT[..., -1], 200.0, 2000.0)
+            # cpT[..., -1] = np.clip(cpT[..., -1], 200.0, 2000.0)
             # Pressure must be positive
-            cpT[..., -2] = np.maximum(cpT[..., -2], 1e3)
+            # cpT[..., -2] = np.maximum(cpT[..., -2], 1e3)
 
             # Update velocity fields after step
             self._update_velocity_fields(p=cpT[..., -2])
@@ -2051,7 +2051,7 @@ class MembraneReactor:
                 n_plateau_steps = 0
                 if verbose >= 2:
                     print(f"  Step {i}: REJECTED (g_ss grew), dt -> {dt:.2e}, "
-                          f"||g_ss||={g_ss_norm:.2e}")
+                          f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
                 continue
 
             # Track best state so far (lowest g_ss)
@@ -2073,27 +2073,27 @@ class MembraneReactor:
                     n_increasing += 1
                     if verbose >= 2:
                         print(f"  Step {i}: poor (red={reduction:.2f}), dt -> {dt:.2e}, "
-                              f"||g_ss||={g_ss_norm:.2e}")
+                              f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
                 elif reduction > 1.0:
                     # Residual drifting upward slightly — hold dt.
                     n_increasing += 1
                     if verbose >= 2:
                         print(f"  Step {i}: drift (red={reduction:.2f}), dt={dt:.2e}, "
-                              f"||g_ss||={g_ss_norm:.2e}")
+                              f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
                 elif reduction < threshold:
                     # Good reduction — increase dt aggressively (dt_increase²).
                     dt = min(dt * dt_increase ** 2, dt_max)
                     n_increasing = 0
                     if verbose >= 2:
                         print(f"  Step {i}: good (red={reduction:.2f}), dt -> {dt:.2e}, "
-                              f"||g_ss||={g_ss_norm:.2e}")
+                              f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
                 else:
                     # threshold ≤ reduction ≤ 1.0 — moderate progress, increase dt normally.
                     dt = min(dt * dt_increase, dt_max)
                     n_increasing = 0
                     if verbose >= 2:
                         print(f"  Step {i}: ok (red={reduction:.2f}), dt -> {dt:.2e}, "
-                              f"||g_ss||={g_ss_norm:.2e}")
+                              f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
 
                 # Track plateau: sole authority on n_plateau_steps.
                 # |reduction - 1| < plateau_tol means the residual is essentially
@@ -2113,7 +2113,7 @@ class MembraneReactor:
                     n_plateau_steps = 0
                     if verbose >= 2:
                         print(f"  Step {i}: Restored best state, "
-                              f"||g_ss||={g_ss_norm:.2e}")
+                              f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
             elif verbose >= 2:
                 print(f"  Step {i}: dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
 
@@ -2135,7 +2135,7 @@ class MembraneReactor:
                 is_converged = True
                 if verbose >= 1:
                     print(f"  Step {i}: CONVERGED (Picard plateau), dt={dt:.2e}, "
-                          f"||g_ss||={g_ss_norm:.2e}")
+                          f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
                 break
 
             g_ss_norm_prev = g_ss_norm
