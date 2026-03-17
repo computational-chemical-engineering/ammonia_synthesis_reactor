@@ -92,6 +92,7 @@ class ReactorConfig:
     dfactor_react_increase: float = 1.5
     dfactor_react_decrease: float = 0.5
     factor_p: float = 1.0
+    kinetics_uses_auxiliary_pressure: bool = True
 
     # Flow rates
     F_ret_in: float = 0.1

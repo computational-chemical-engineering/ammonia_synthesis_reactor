@@ -44,7 +44,7 @@ DEFAULTS = {
     "dt": 1e7,  # Time step size (used as dt_max when adaptive dt is enabled)
     "dt_init": 1e-3,  # Initial time step for adaptive dt
     "dt_min": 1e-6,  # Minimum time step
-    "dt_max": 1e7,  # Maximum time step
+    "dt_max": 1e6,  # Maximum time step
     "dt_increase_factor": 2.0,  # Factor to increase dt after good convergence
     "dt_decrease_factor": 0.5,  # Factor to decrease dt after poor convergence
     "adaptive_dt_threshold": 0.5,  # Residual reduction threshold for increasing dt
@@ -75,6 +75,10 @@ DEFAULTS = {
     # comparable to concentration/temperature diagonals. Default 1.0 may cause singular
     # matrices for some problems due to very small dc_tot/dp derivatives (~2e-4).
     "factor_p": 1.0,
+    # If True, reaction kinetics uses the auxiliary pressure iterate p.
+    # If False, thermodynamic partial pressures are reconstructed from c and T
+    # using the ideal-gas relation p_i = c_i * R * T.
+    "kinetics_uses_auxiliary_pressure": True,
     # Molar flow rates
     "F_ret_in": 0.1,   # Inlet molar flow rate [mol/s]
     "F_perm_in": 0.02, # Inlet molar flow rate [mol/s]

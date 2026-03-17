@@ -24,6 +24,7 @@ import numpy as np
 from scipy import constants
 from scipy.interpolate import CubicSpline
 from mixture_property_database import MixturePropertyDatabase
+from numerical_safety import finite_minmax_context, guarded_compute, require_positive
 
 
 class GasMixtureCorrelations:
@@ -178,6 +179,9 @@ class GasMixtureCorrelations:
         T_t = T.reshape(shapes_t[0])
         p_t = p.reshape(shapes_t[1])
         self.Tc.reshape((1, -1, 1))
+        context = {**finite_minmax_context("T", T), **finite_minmax_context("p_bar", p, scale=1e-5)}
+        require_positive("temperature", T, context=context)
+        require_positive("pressure", p, context=context)
 
         # y_sqrt_ai = y_t*self.aip_sqrt*np.abs(1.0 + self.mi*(1.0 - np.sqrt(T_t/Tc_t)))
         # y_sqrt_ai_j = np.expand_dims(y_sqrt_ai, axis=1)
@@ -192,12 +196,17 @@ class GasMixtureCorrelations:
         # real_roots = np.where(np.isreal(roots), np.real(roots), -np.inf)
         # Z = np.max(real_roots, axis=-1)
         # c = p_t / (R * T_t * Z)
-        c = p_t / (R * T_t)  # Initial molar density without compressibility factor
+        c = guarded_compute(
+            "computing molar density",
+            lambda: p_t / (R * T_t),
+            **context,
+        )
         return c.reshape(shape_out)
 
     def molecular_weight(self, y, axis=-1):
         """
         Compute the molecular weight of a gas mixture.
+        When called with species concentrations, the function returns the mass density.
 
         Parameters:
         -----------
@@ -270,16 +279,22 @@ class GasMixtureCorrelations:
         )
         y_t = y.reshape(shape_t_y)
         T_t = T.reshape(shape_t_T)
+        context = finite_minmax_context("T", T)
+        require_positive("temperature", T, context=context)
 
         # Safeguard: clip temperature to valid range for correlations
         T_t = np.clip(T_t, 200.0, 3000.0)
 
         # Compute pure component viscosities (mu_i) using the Wilke correlation
-        mu_i = (
-            self.wilke_C1
-            * T_t**self.wilke_C2
-            * (1 + self.wilke_C3 / T_t + self.wilke_C4 / T_t**2)
-        )  # Shape: same as y
+        mu_i = guarded_compute(
+            "computing mixture viscosity",
+            lambda: (
+                self.wilke_C1
+                * T_t**self.wilke_C2
+                * (1 + self.wilke_C3 / T_t + self.wilke_C4 / T_t**2)
+            ),
+            **context,
+        )
 
         # Expand dimensions to compute interaction terms phi_ij
         mu_i_exp = np.expand_dims(mu_i, 2)  # Shape: (..., num_species, 1)
@@ -290,16 +305,24 @@ class GasMixtureCorrelations:
         Mw_j_exp = np.expand_dims(Mw_t, 1)  # Shape: (..., 1, num_species)
 
         # Compute the interaction parameter φ_ij (broadcasted properly)
-        phi_ij = (
-            (1 + (mu_i_exp / mu_j_exp) ** 0.5 * (Mw_i_exp / Mw_j_exp) ** 0.25) ** 2
-        ) / ((8 * (1 + Mw_i_exp / Mw_j_exp)) ** 0.5)
+        phi_ij = guarded_compute(
+            "computing viscosity interactions",
+            lambda: (
+                (1 + (mu_i_exp / mu_j_exp) ** 0.5 * (Mw_i_exp / Mw_j_exp) ** 0.25) ** 2
+            ) / ((8 * (1 + Mw_i_exp / Mw_j_exp)) ** 0.5),
+            **context,
+        )
 
         # Compute summation term in Wilke's formula (denominator)
         y_j = np.expand_dims(y_t, 1)  # Shape: (..., num_species, 1)
         phi_sum = np.sum(phi_ij * y_j, axis=2)  # Sum over species axis
 
         # Compute final mixture viscosity
-        mu_mix = np.sum(y_t * mu_i / phi_sum, axis=1)  # Sum over species axis
+        mu_mix = guarded_compute(
+            "computing mixture viscosity average",
+            lambda: np.sum(y_t * mu_i / phi_sum, axis=1),
+            **context,
+        )
         return mu_mix.reshape(shape_out)
 
     def thermal_conductivity(self, y, T, axis=-1):
@@ -327,16 +350,22 @@ class GasMixtureCorrelations:
         )
         y_t = y.reshape(shape_t_y)
         T_t = T.reshape(shape_t_T)
+        context = finite_minmax_context("T", T)
+        require_positive("temperature", T, context=context)
 
         # Safeguard: clip temperature to valid range for correlations
         T_t = np.clip(T_t, 200.0, 3000.0)
 
         # Compute pure component viscosities (mu_i) using the Wilke correlation
-        mu_i = (
-            self.wilke_C1
-            * T_t**self.wilke_C2
-            * (1 + self.wilke_C3 / T_t + self.wilke_C4 / T_t**2)
-        )  # Shape: same as y
+        mu_i = guarded_compute(
+            "computing conductivity viscosity basis",
+            lambda: (
+                self.wilke_C1
+                * T_t**self.wilke_C2
+                * (1 + self.wilke_C3 / T_t + self.wilke_C4 / T_t**2)
+            ),
+            **context,
+        )
 
         # Expand dimensions to compute interaction terms phi_ij
         mu_i_exp = np.expand_dims(mu_i, 2)  # Shape: (..., num_species, 1)
@@ -347,20 +376,32 @@ class GasMixtureCorrelations:
         Mw_j_exp = np.expand_dims(Mw_t, 1)  # Shape: (..., 1, num_species)
 
         # Compute the interaction parameter φ_ij (broadcasted properly)
-        phi_ij = (
-            (1 + (mu_i_exp / mu_j_exp) ** 0.5 * (Mw_i_exp / Mw_j_exp) ** 0.25) ** 2
-        ) / ((8 * (1 + Mw_i_exp / Mw_j_exp)) ** 0.5)
+        phi_ij = guarded_compute(
+            "computing conductivity interactions",
+            lambda: (
+                (1 + (mu_i_exp / mu_j_exp) ** 0.5 * (Mw_i_exp / Mw_j_exp) ** 0.25) ** 2
+            ) / ((8 * (1 + Mw_i_exp / Mw_j_exp)) ** 0.5),
+            **context,
+        )
 
         # Compute summation term in Wilke's formula (denominator)
         y_j = np.expand_dims(y_t, 1)  # Shape: (..., num_species, 1)
         phi_sum = np.sum(phi_ij * y_j, axis=2)  # Sum over species axis
 
-        kg_i = (
-            self.therm_cond_C1
-            * T_t**self.therm_cond_C2
-            * (1 + self.therm_cond_C3 / T_t + self.therm_cond_C4 / T_t**2)
+        kg_i = guarded_compute(
+            "computing species thermal conductivity",
+            lambda: (
+                self.therm_cond_C1
+                * T_t**self.therm_cond_C2
+                * (1 + self.therm_cond_C3 / T_t + self.therm_cond_C4 / T_t**2)
+            ),
+            **context,
         )
-        kg_mix = np.sum(y_t * kg_i / phi_sum, axis=1)  # Sum over species axis
+        kg_mix = guarded_compute(
+            "computing mixture thermal conductivity",
+            lambda: np.sum(y_t * kg_i / phi_sum, axis=1),
+            **context,
+        )
         return kg_mix.reshape(shape_out)
 
     def get_species_specific_heat_spline(self, T, dT=5.0, T_ref=None):
@@ -382,6 +423,8 @@ class GasMixtureCorrelations:
             Cubic spline for the specific heat capacity of the species.
         """
         T_lin = np.asarray(T).ravel()
+        context = finite_minmax_context("T", T_lin)
+        require_positive("temperature", T_lin, context=context)
 
         # Safeguard: clip temperatures to valid range and handle NaN
         T_lin = np.clip(T_lin, 200.0, 3000.0)
@@ -402,12 +445,16 @@ class GasMixtureCorrelations:
 
         def c_p_func(T):
             T_lin = T.reshape((-1, 1))
-            return 1e-3 * (
-                self.c_p_C1
-                + self.c_p_C2
-                * ((self.c_p_C3 / T_lin) / np.sinh(self.c_p_C3 / T_lin)) ** 2
-                + self.c_p_C4
-                * ((self.c_p_C5 / T_lin) / np.cosh(self.c_p_C5 / T_lin)) ** 2
+            return guarded_compute(
+                "computing species heat capacity spline",
+                lambda: 1e-3 * (
+                    self.c_p_C1
+                    + self.c_p_C2
+                    * ((self.c_p_C3 / T_lin) / np.sinh(self.c_p_C3 / T_lin)) ** 2
+                    + self.c_p_C4
+                    * ((self.c_p_C5 / T_lin) / np.cosh(self.c_p_C5 / T_lin)) ** 2
+                ),
+                **context,
             )
 
         if T_min == T_max:
@@ -437,6 +484,7 @@ class GasMixtureCorrelations:
             Specific heat capacity of each species (J/mol·K).
         """
         T = np.asarray(T)
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
         shape_t_T, shape_out, _ = get_tri_shapes(shapes_nonspecies=T.shape, axis=axis)
         T_t = T.reshape(shape_t_T)
         axis = axis if axis >= 0 else len(shape_out) + axis
@@ -471,6 +519,7 @@ class GasMixtureCorrelations:
         """
         c = np.asarray(c)
         T = np.asarray(T)
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
         shape_t_c, shape_t_T, _, shape_out = get_tri_shapes(
             shapes_species=c.shape, shapes_nonspecies=T.shape, axis=axis
         )
@@ -503,6 +552,7 @@ class GasMixtureCorrelations:
             Enthalpies of the species (J/kg).
         """
         T = np.asarray(T)
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
         shape_t_T, _, shape_out = get_tri_shapes(shapes_nonspecies=T.shape, axis=axis)
         c_p_spline = self.get_species_specific_heat_spline(T, dT=dT, T_ref=T_ref)
         H_spline = c_p_spline.antiderivative()
@@ -536,6 +586,7 @@ class GasMixtureCorrelations:
         """
         y = np.asarray(y)
         T = np.asarray(T)
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
         shape_t_y, shape_t_T, _, shape_out = get_tri_shapes(
             shapes_species=y.shape, shapes_nonspecies=T.shape, axis=axis
         )
@@ -576,6 +627,9 @@ class GasMixtureCorrelations:
         y_t = y.reshape(shape_t_y)
         T_t = T.reshape(shapes_t[0])
         p_t = p.reshape(shapes_t[1])
+        context = {**finite_minmax_context("T", T), **finite_minmax_context("p_bar", p, scale=1e-5)}
+        require_positive("temperature", T, context=context)
+        require_positive("pressure", p, context=context)
 
         # Safeguard: clip temperature and pressure to valid ranges
         T_t = np.clip(T_t, 200.0, 3000.0)
@@ -584,8 +638,16 @@ class GasMixtureCorrelations:
         y_t = np.where(y_t < 1e-10, 1e-10, y_t)
         y_t = y_t / np.sum(y_t, axis=1, keepdims=True)
         y_j = np.expand_dims(y_t, axis=1)
-        D_sc = (1.0 - y_t) / np.sum(y_j * self.Dij_inv, axis=2)
-        D_i = D_sc * (T_t / 273.0) ** 1.75 * (1e5 / p_t)
+        D_sc = guarded_compute(
+            "computing diffusion basis",
+            lambda: (1.0 - y_t) / np.sum(y_j * self.Dij_inv, axis=2),
+            **context,
+        )
+        D_i = guarded_compute(
+            "computing diffusion coefficients",
+            lambda: D_sc * (T_t / 273.0) ** 1.75 * (1e5 / p_t),
+            **context,
+        )
 
         return D_i.reshape(shape_out)
 

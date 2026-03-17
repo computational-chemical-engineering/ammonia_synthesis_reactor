@@ -1,8 +1,15 @@
 import numpy as np
 from scipy import constants
 
+from numerical_safety import (
+    finite_minmax_context,
+    guarded_compute,
+    require_positive,
+)
+
 C_SMALL = 1e-4  # Small concentration to avoid division by zero (mol/m^3)
 A_SMALL = 1e-4  # Small activity to avoid division by zero (bar)
+
 
 class AmmoniaSynthesisKinetics:
     """
@@ -171,10 +178,15 @@ class AmmoniaSynthesisKinetics:
             Equilibrium constant array.
         """
         # self.K_eq = T**(-2.691122) * 10**(-5.519265e-5 * T + 1.848863e-7 * T**2 + 2001.6 / T + 2.6899)
-        self.K_eq = np.exp(
-            -2.691122 * np.log(T)
-            + np.log(10.0)
-            * ((-5.519265e-5 + 1.848863e-7 * T) * T + 2001.6 / T + 2.6899)
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
+        self.K_eq = guarded_compute(
+            "computing K_eq",
+            lambda: np.exp(
+                -2.691122 * np.log(T)
+                + np.log(10.0)
+                * ((-5.519265e-5 + 1.848863e-7 * T) * T + 2001.6 / T + 2.6899)
+            ),
+            **finite_minmax_context("T", T),
         )
         return self.K_eq
 
@@ -192,7 +204,12 @@ class AmmoniaSynthesisKinetics:
         numpy.ndarray
             Forward reaction rate constant array.
         """
-        self.k_f = 9.02e8 * np.exp(-23000.0 / (self.Rc * T))
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
+        self.k_f = guarded_compute(
+            "computing kinetic constant",
+            lambda: 9.02e8 * np.exp(-23000.0 / (self.Rc * T)),
+            **finite_minmax_context("T", T),
+        )
         return self.k_f
 
     def compute_adsorption_constants(self, T):
@@ -209,8 +226,17 @@ class AmmoniaSynthesisKinetics:
         tuple
             Adsorption constants for H2 and NH3.
         """
-        self.K_H2 = np.exp(-13.6 / self.Rc + 9000.0 / (self.Rc * T))
-        self.K_NH3 = np.exp(-8.3 / self.Rc + 7000.0 / (self.Rc * T))
+        require_positive("temperature", T, context=finite_minmax_context("T", T))
+        self.K_H2 = guarded_compute(
+            "computing H2 adsorption constant",
+            lambda: np.exp(-13.6 / self.Rc + 9000.0 / (self.Rc * T)),
+            **finite_minmax_context("T", T),
+        )
+        self.K_NH3 = guarded_compute(
+            "computing NH3 adsorption constant",
+            lambda: np.exp(-8.3 / self.Rc + 7000.0 / (self.Rc * T)),
+            **finite_minmax_context("T", T),
+        )
         return self.K_H2, self.K_NH3
 
     def compute_fugacity_coeffs(self, T, p):
@@ -239,12 +265,19 @@ class AmmoniaSynthesisKinetics:
         self.fugacity_coeffs = np.empty(shape)
         slices = [slice(None)] * ndim
         slices[axis] = 0
-        self.fugacity_coeffs[tuple(slices)] = np.exp(
-            np.exp(-3.8402 * T_loc**0.125 + 0.541) * p_loc
-            - np.exp(-0.1263 * np.sqrt(T_loc) - 15.98) * p_loc**2
-            + 300.0
-            * (np.exp(-0.011901 * T_loc - 5.941))
-            * (np.exp(-p_loc / 300.0) - 1.0)
+        context = {**finite_minmax_context("T", T), **finite_minmax_context("p_bar", p_loc)}
+        require_positive("temperature", T, context=context)
+        require_positive("pressure", p, context=context)
+        self.fugacity_coeffs[tuple(slices)] = guarded_compute(
+            "computing H2 fugacity coefficients",
+            lambda: np.exp(
+                np.exp(-3.8402 * T_loc**0.125 + 0.541) * p_loc
+                - np.exp(-0.1263 * np.sqrt(T_loc) - 15.98) * p_loc**2
+                + 300.0
+                * (np.exp(-0.011901 * T_loc - 5.941))
+                * (np.exp(-p_loc / 300.0) - 1.0)
+            ),
+            **context,
         )
         slices[axis] = 1
         self.fugacity_coeffs[tuple(slices)] = (
@@ -292,21 +325,28 @@ class AmmoniaSynthesisKinetics:
         a_H2 = np.take(activities, 0, axis=self.axis)
         a_N2 = np.take(activities, 1, axis=self.axis)
         a_NH3 = np.take(activities, 2, axis=self.axis)
-        rate = (
-            self.rate_constant
-            * (
-                self.pow(a_N2, 0.5)
-                * self.pow(a_H2, 0.375)
-                / (A_SMALL + np.maximum(a_NH3, 0.0)) ** 0.25
-                - (1.0 / self.K_eq)
-                * self.pow(a_NH3, 0.75)
-                / (A_SMALL + np.maximum(a_H2, 0.0)) ** 1.125
-            )
-            / (
-                1.0
-                + self.K_H2 * np.abs(a_H2) ** 0.3
-                + self.K_NH3 * np.abs(a_NH3) ** 0.2
-            )
+        rate = guarded_compute(
+            "computing ammonia synthesis rate",
+            lambda: (
+                self.rate_constant
+                * (
+                    self.pow(a_N2, 0.5)
+                    * self.pow(a_H2, 0.375)
+                    / (A_SMALL + np.maximum(a_NH3, 0.0)) ** 0.25
+                    - (1.0 / self.K_eq)
+                    * self.pow(a_NH3, 0.75)
+                    / (A_SMALL + np.maximum(a_H2, 0.0)) ** 1.125
+                )
+                / (
+                    1.0
+                    + self.K_H2 * np.abs(a_H2) ** 0.3
+                    + self.K_NH3 * np.abs(a_NH3) ** 0.2
+                )
+            ),
+            T_min=float(np.nanmin(self.T)),
+            T_max=float(np.nanmax(self.T)),
+            p_min=float(np.nanmin(p_loc)),
+            p_max=float(np.nanmax(p_loc)),
         )
         shape = [1] * p_partial.ndim
         shape[self.axis] = -1

@@ -3,7 +3,7 @@ import logging
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 # test: diffusion coefficient is 0
 # test: simplify ergun
@@ -47,6 +47,7 @@ from physics import (
     make_dirichlet_bc,
 )
 from solvers import ContinuationConfig, NewtonConfig, armijo_line_search
+from numerical_safety import RecoverableNumericalError
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -87,6 +88,21 @@ class SegregatedSolveResult:
             self.convergence_factor,
             self.convergence_factor_p,
         )
+
+
+@dataclass
+class SteadyStateSolveStatus:
+    """Structured status from the adaptive pseudo-transient steady-state solve."""
+
+    converged: bool
+    num_steps_attempted: int
+    num_steps_accepted: int
+    final_dt: float
+    steady_state_norm: Optional[float]
+    initial_steady_state_norm: Optional[float]
+    best_steady_state_norm: Optional[float]
+    baseline_steady_state_norm: Optional[float]
+    last_failure_message: Optional[str]
 
 
 # =============================================================================
@@ -159,6 +175,8 @@ class MembraneReactor:
         self._init_jac()
         self.factor_norm_c = (self.cpT[..., :-2].size) ** (-1.0 / self.ord_norm)
         self.factor_norm_p = (self.cpT[..., -2].size) ** (-1.0 / self.ord_norm)
+        self.last_solver_failure_message = None
+        self.last_solve_status = None
 
         dt_cfl = self._compute_dt_cfl(cfl=CFL_INIT)
         self.solve(dt=dt_cfl, use_adaptive_react=False, num_timesteps=2)
@@ -863,6 +881,14 @@ class MembraneReactor:
             k_field_ret_rad, shape_p_ret, axis=1
         )
 
+    def _reaction_partial_pressures(self, c_ret, T_ret, p_ret):
+        """Return thermodynamic partial pressures used by the kinetics model."""
+        if self.kinetics_uses_auxiliary_pressure:
+            c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
+            c_tot_ret_safe = np.maximum(np.abs(c_tot_ret), 1e-10)
+            return c_ret * (p_ret[..., np.newaxis] / c_tot_ret_safe)
+        return c_ret * (self.Rg * T_ret)[..., np.newaxis]
+
     def _construct_jac_darcy(self):
         """Assemble permeability-weighted matrices for velocity (Darcy / Ergun).
 
@@ -1261,11 +1287,7 @@ class MembraneReactor:
         y = c / c_sum_safe[..., np.newaxis]
 
         c_ret = c[:, self.num_r_perm :, :]
-        c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
         _, p_ret = self._split_perm_and_ret(p)
-        # Use safe denominator for pressure/concentration ratio
-        c_tot_ret_safe = np.maximum(np.abs(c_tot_ret), 1e-10)
-        p_over_c_tot = p_ret[..., np.newaxis] / c_tot_ret_safe
         T_ret = T[:, self.num_r_perm :]        
         
         self._construct_darcy_matrices(c=cpT[..., :-2], p=cpT[..., -2])
@@ -1290,7 +1312,9 @@ class MembraneReactor:
             if c_old is not None:
                 jac_cc += (1.0 / dt) * self.jac_c_accum
             g_react, jac_react = self.numjac(
-                lambda c: self.factor_react * self.kinetics(c * p_over_c_tot), c_ret
+                lambda c_var: self.factor_react
+                * self.kinetics(self._reaction_partial_pressures(c_var, T_ret, p_ret), T_ret),
+                c_ret,
             )
             shape_c_ret = c_ret.shape
             offset = (0, self.num_r_perm, 0)
@@ -1327,22 +1351,26 @@ class MembraneReactor:
 
                 # Task 1 (J_cT): d(g_react)/d(T_ret)
                 # Maps T_ret perturbations → concentration residual changes
-                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                self.kinetics(self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret)
                 _, jac_cT_ret = self.numjac_cT(
                     lambda T_var: self.factor_react * self.kinetics(
-                        c_ret * p_over_c_tot, T_var[..., 0]
+                        self._reaction_partial_pressures(c_ret, T_var[..., 0], p_ret),
+                        T_var[..., 0],
                     ),
                     T_ret[..., np.newaxis],
                 )
 
                 # Task 2 (J_Tc): d(heat_source)/d(c_ret)
                 # Maps concentration perturbations → temperature residual changes
-                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                self.kinetics(self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret)
                 _, jac_Tc_ret = self.numjac_Tc(
                     lambda c_var: (
                         np.sum(
                             self.factor_react
-                            * self.kinetics(c_var * p_over_c_tot)
+                            * self.kinetics(
+                                self._reaction_partial_pressures(c_var, T_ret, p_ret),
+                                T_ret,
+                            )
                             * enthalpies,
                             axis=-1,
                         )
@@ -1353,12 +1381,15 @@ class MembraneReactor:
 
                 # Task 3 (J_TT_react): d(heat_source)/d(T_ret)
                 # Adds Arrhenius temperature sensitivity to jac_TT
-                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                self.kinetics(self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret)
                 _, jac_TT_react_ret = self.numjac_TT_react(
                     lambda T_var: (
                         np.sum(
                             self.factor_react
-                            * self.kinetics(c_ret * p_over_c_tot, T_var[..., 0])
+                            * self.kinetics(
+                                self._reaction_partial_pressures(c_ret, T_var[..., 0], p_ret),
+                                T_var[..., 0],
+                            )
                             * self.correlation.species_enthalpies(T_var[..., 0]),
                             axis=-1,
                         )
@@ -1374,7 +1405,9 @@ class MembraneReactor:
                     offset=(0, self.num_r_perm, 0),
                 )
                 # Restore kinetics to current (c_ret, T_ret) after all FD sweeps
-                self.kinetics(c_ret * p_over_c_tot, T_ret)
+                self.kinetics(self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret)
+                self._construct_darcy_matrices(c=c, T=T, p=p)
+                self._update_velocity_fields(p=p)
 
             shape_c = c.shape
             shape_p = p.shape + (1,)
@@ -1425,7 +1458,9 @@ class MembraneReactor:
         else:
             c_tot = self.correlation.molar_density(y, T, p)
             # Pass T_ret explicitly so kinetics always uses the current temperature
-            g_react = self.factor_react * self.kinetics(c_ret * p_over_c_tot, T_ret)
+            g_react = self.factor_react * self.kinetics(
+                self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret
+            )
 
         g_c = self.g_c_in.reshape(c.shape) + g_conv + g_diff
         if c_old is not None:
@@ -1692,10 +1727,10 @@ class MembraneReactor:
         u_ret_i = interp_stagg_to_cntr(u_ret_ax_i, self.z_f, self.z_c, axis=0)
 
         visc_ret = self.correlation.viscosity(y_ret_i, T_ret_i)
-        rho_ret = self.correlation.molecular_weight(c_ret_i)
+        rho_ret = self.correlation.molecular_weight(c_ret_i) # This is actually a mass density when called with concentrations instead of mole fractions
         cp_ret = self.correlation.specific_heat(c_ret_i, T_ret_i)
         Re_ret = np.abs(rho_ret * self.dp * u_ret_i / visc_ret)
-        Pr_ret = np.abs(visc_ret * cp_ret / lmbda_ret_rad[:, [0]])
+        Pr_ret = np.abs(visc_ret/rho_ret * cp_ret / lmbda_ret_rad[:, [0]])
         Nu_ret = self.Nu_ret(Re_ret, Pr_ret)
         # Add minimum heat transfer coefficient to avoid division by zero
         h_min = 1.0  # W/(m^2 K) - natural convection lower bound
@@ -1703,10 +1738,10 @@ class MembraneReactor:
 
         d_tube = 2.0 * self.r_f_perm[-1]
         visc_perm = self.correlation.viscosity(y_perm_i, T_perm_i)
-        rho_perm = self.correlation.molecular_weight(c_perm_i)
+        rho_perm = self.correlation.molecular_weight(c_perm_i) # This is actually a mass density when called with concentrations instead of mole fractions
         cp_perm = self.correlation.specific_heat(c_perm_i, T_perm_i)
         Re_perm = np.abs(rho_perm * d_tube * u_perm_i / visc_perm)
-        Pr_perm = np.abs(visc_perm * cp_perm / lmbda_perm_rad[:, [-1]])
+        Pr_perm = np.abs(visc_perm/rho_perm * cp_perm / lmbda_perm_rad[:, [-1]])
         Nu_perm = self.Nu_perm(Re_perm, Pr_perm)
         h_perm = np.maximum(Nu_perm * lmbda_perm_rad[:, [-1]] / d_tube, h_min)
 
@@ -1766,6 +1801,12 @@ class MembraneReactor:
         factor_norm_c = self.factor_norm_c
         factor_norm_p = self.factor_norm_p
         cpT_vec = cpT.ravel()
+        self.last_solver_failure_message = None
+
+        def mark_retryable_failure(exc, stage):
+            message = f"{stage} failed at dt={dt:.2e}: {exc}"
+            self.last_solver_failure_message = message
+            logger.debug(message)
 
         # Define norm function for combined concentration + pressure residual
         def compute_norms(g):
@@ -1784,7 +1825,11 @@ class MembraneReactor:
         g_p_norm_init = None
 
         for k in range(self.num_concentration_iterations):
-            g, jac = self._construct_g_cpT(c_old, T_old, dt, compute_jac=True)
+            try:
+                g, jac = self._construct_g_cpT(c_old, T_old, dt, compute_jac=True)
+            except RecoverableNumericalError as exc:
+                mark_retryable_failure(exc, stage="residual/Jacobian assembly")
+                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
             g_norm, g_p_norm = compute_norms(g)
 
             if k == 0:
@@ -1811,15 +1856,19 @@ class MembraneReactor:
                     g_c, g_p = compute_norms(g_arr.reshape(shape_cpT))
                     return max(g_c, g_p)  # Combined norm for line search
 
-                x_new, g_new_norm, alpha, ls_success = armijo_line_search(
-                    x=cpT_vec.copy(),
-                    dx=dcpT,
-                    g_norm=max(g_norm, g_p_norm),
-                    residual_fn=lambda x: eval_residual(x).ravel(),
-                    norm_fn=norm_fn,
-                    armijo_coeff=ARMIJO_COEFF,
-                    min_alpha=MIN_LINE_SEARCH_ALPHA,
-                )
+                try:
+                    x_new, g_new_norm, alpha, ls_success = armijo_line_search(
+                        x=cpT_vec.copy(),
+                        dx=dcpT,
+                        g_norm=max(g_norm, g_p_norm),
+                        residual_fn=lambda x: eval_residual(x).ravel(),
+                        norm_fn=norm_fn,
+                        armijo_coeff=ARMIJO_COEFF,
+                        min_alpha=MIN_LINE_SEARCH_ALPHA,
+                    )
+                except RecoverableNumericalError as exc:
+                    mark_retryable_failure(exc, stage="line search residual evaluation")
+                    return np.inf, g_norm_init, np.inf, g_p_norm_init, False
                 cpT_vec[:] = x_new
 
                 if not ls_success:
@@ -1846,7 +1895,11 @@ class MembraneReactor:
             self._update_velocity_fields(p=cpT[..., -2])
 
             # Recompute residual norms for convergence check
-            g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
+            try:
+                g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
+            except RecoverableNumericalError as exc:
+                mark_retryable_failure(exc, stage="post-step residual evaluation")
+                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
             g_norm, g_p_norm = compute_norms(g)
 
             # Check convergence
@@ -1869,10 +1922,9 @@ class MembraneReactor:
     def _compute_dt_chem_min(self):
         """Return minimum explicit chemical time step avoiding negative c."""
         c_ret = self.cpT[:, self.num_r_perm :, :-2]
-        c_tot_ret = np.sum(c_ret, axis=-1, keepdims=True)
+        _, T_ret = self._split_perm_and_ret(self.cpT[..., -1])
         _, p_ret = self._split_perm_and_ret(self.cpT[..., -2])
-        p_over_c_tot = p_ret[..., np.newaxis] / c_tot_ret
-        rates = self.kinetics(c_ret * p_over_c_tot)
+        rates = self.kinetics(self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret)
         eps = EPS_CHEM_TIMESTEP
         dt_chem_local = np.where(
             rates < 0, np.maximum(c_ret, eps) / (-rates + eps), np.inf
@@ -1955,8 +2007,9 @@ class MembraneReactor:
         n_plateau_required: int = 20,
         plateau_tol: float = 0.02,
         verbose: int = 0,
+        return_status: bool = False,
         **kwargs: Any,
-    ) -> bool:
+    ) -> Union[bool, SteadyStateSolveStatus]:
         """Solve the steady-state reactor problem.
 
         Uses adaptive time-stepping for robust and efficient convergence.
@@ -1970,10 +2023,11 @@ class MembraneReactor:
             use_adaptive_dt: If True, adapt dt based on convergence quality.
             steady_state_tol: Relative tolerance for steady-state detection.
             verbose: Verbosity level (0=silent, 1=summary, 2=detailed).
+            return_status: If True, return a structured solve-status object.
             **kwargs: Additional arguments passed to solve methods.
 
         Returns:
-            True if converged to steady state, False otherwise.
+            True/False by default, or a SteadyStateSolveStatus when return_status=True.
         """
         if num_timesteps is None:
             num_timesteps = self.num_timesteps
@@ -1987,6 +2041,7 @@ class MembraneReactor:
         dt_increase = getattr(self, 'dt_increase_factor', 2.0)
         dt_decrease = getattr(self, 'dt_decrease_factor', 0.5)
         threshold = getattr(self, 'adaptive_dt_threshold', 0.5)
+        self.last_solver_failure_message = None
 
         g_ss_norm_prev = None
         g_ss_norm_0 = None   # initial SS residual, used for relative convergence
@@ -1994,17 +2049,39 @@ class MembraneReactor:
         g_ss_norm_best = None   # lowest g_ss seen — best physical state
         cpT_best = None
         is_converged = False
+        accepted_steps = 0
         n_increasing = 0        # consecutive steps with g_ss growing
         n_plateau_steps = 0     # consecutive steps where |reduction-1| < plateau_tol
+
+        def finalize(converged: bool, steps_attempted: int):
+            status = SteadyStateSolveStatus(
+                converged=converged,
+                num_steps_attempted=steps_attempted,
+                num_steps_accepted=accepted_steps,
+                final_dt=dt,
+                steady_state_norm=g_ss_norm,
+                initial_steady_state_norm=g_ss_norm_0,
+                best_steady_state_norm=g_ss_norm_best,
+                baseline_steady_state_norm=g_ss_norm_baseline if 'g_ss_norm_baseline' in locals() else None,
+                last_failure_message=self.last_solver_failure_message,
+            )
+            self.last_solve_status = status
+            return status if return_status else status.converged
 
         # Compute baseline SS residual before any steps.
         # Used to detect if a first accepted step produced a corrupted state
         # (e.g. when dt_init is too large and the Newton step jumps to a
         # non-physical region without producing NaN).
-        g_baseline, _ = self._construct_g_cpT(
-            self.cpT[..., :-2].copy(), self.cpT[..., -1].copy(), 1e10, compute_jac=False
-        )
-        g_ss_norm_baseline  = np.linalg.norm(g_baseline)
+        try:
+            g_baseline, _ = self._construct_g_cpT(
+                self.cpT[..., :-2].copy(), self.cpT[..., -1].copy(), 1e10, compute_jac=False
+            )
+            g_ss_norm_baseline  = np.linalg.norm(g_baseline)
+        except RecoverableNumericalError as exc:
+            self.last_solver_failure_message = f"initial steady-state residual evaluation failed: {exc}"
+            if verbose >= 1:
+                print(self.last_solver_failure_message)
+            return finalize(False, 0)
 
         if verbose >= 1:
             print(f"Starting adaptive dt solve: dt_init={dt_init:.2e}, "
@@ -2027,15 +2104,29 @@ class MembraneReactor:
                 dt = max(dt * dt_decrease, dt_min)
                 n_plateau_steps = 0
                 if verbose >= 2:
-                    print(f"  Step {i}: REJECTED (NaN/singular), dt -> {dt:.2e}")
+                    reason = self.last_solver_failure_message or "NaN/singular"
+                    print(f"  Step {i}: REJECTED ({reason}), dt -> {dt:.2e}")
                 continue
 
             # Compute actual steady-state residual (without transient term)
             # dt=1e10 makes the transient term (c-c_old)/dt negligible.
             # Note: _construct_g_cpT reads self.cpT directly for concentrations/pressure/T;
             # the c_old/T_old args only affect the negligible transient term at dt=1e10.
-            g_ss, _ = self._construct_g_cpT(c_old, T_old, 1e10, compute_jac=False)
-            g_ss_norm = np.linalg.norm(g_ss)
+            try:
+                g_ss, _ = self._construct_g_cpT(c_old, T_old, 1e10, compute_jac=False)
+                g_ss_norm = np.linalg.norm(g_ss)
+            except RecoverableNumericalError as exc:
+                self.last_solver_failure_message = (
+                    f"steady-state residual evaluation failed at dt={dt:.2e}: {exc}"
+                )
+                self.cpT = cpT_backup
+                self._construct_darcy_matrices()
+                self._update_velocity_fields(self.cpT[..., -2])
+                dt = max(dt * dt_decrease, dt_min)
+                n_plateau_steps = 0
+                if verbose >= 2:
+                    print(f"  Step {i}: REJECTED ({self.last_solver_failure_message}), dt -> {dt:.2e}")
+                continue
 
             # --- Reject if SS residual increased dramatically vs previous accepted step ---
             # Do NOT compare against baseline for step 0: the baseline is computed with
@@ -2053,6 +2144,8 @@ class MembraneReactor:
                     print(f"  Step {i}: REJECTED (g_ss grew), dt -> {dt:.2e}, "
                           f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
                 continue
+
+            accepted_steps += 1
 
             # Track best state so far (lowest g_ss)
             if g_ss_norm_best is None or g_ss_norm < g_ss_norm_best:
@@ -2150,10 +2243,15 @@ class MembraneReactor:
                 print(f"  Restored best state: ||g_ss_best||={g_ss_norm_best:.2e}")
 
         if verbose >= 1 and not is_converged:
-            print(f"  Did not converge after {num_timesteps} steps, "
-                  f"final ||g_ss||={g_ss_norm:.2e}, dt={dt:.2e}")
+            if g_ss_norm is None:
+                reason = self.last_solver_failure_message or "no accepted timestep"
+                print(f"  Did not converge after {num_timesteps} steps, "
+                      f"no accepted step, dt={dt:.2e}, reason={reason}")
+            else:
+                print(f"  Did not converge after {num_timesteps} steps, "
+                      f"final ||g_ss||={g_ss_norm:.2e}, dt={dt:.2e}")
 
-        return is_converged
+        return finalize(is_converged, i + 1 if num_timesteps > 0 else 0)
 
     def _solve_adaptive_react(self, dt=None, c_old=None, T_old=None, verbose=0):
         """Solve using adaptive continuation on reaction rate scaling factor.
@@ -2359,6 +2457,9 @@ class MembraneReactor:
                 result = self._solve_step(c_old, T_old, dt)
                 is_converged = result.converged
                 is_converging = is_converged
+            except RecoverableNumericalError as exc:
+                self.last_solver_failure_message = f"adaptive dt step failed at dt={dt:.2e}: {exc}"
+                is_converging = False
             except Exception:
                 is_converging = False
             if is_converging:
@@ -2382,7 +2483,10 @@ class MembraneReactor:
                     self._construct_darcy_matrices()
                     self._update_velocity_fields(p=self.cpT[..., -2])
                     if verbose > 1:
-                        logger.info("Reduced dt to %.4e", dt)
+                        if self.last_solver_failure_message is not None:
+                            logger.info("Reduced dt to %.4e after %s", dt, self.last_solver_failure_message)
+                        else:
+                            logger.info("Reduced dt to %.4e", dt)
         if verbose > 1 and not is_converged:
             logger.warning("Failed: could not converge at t = %.4e", t)
         return is_converged
