@@ -145,7 +145,7 @@ def run_case_studies(csv_path="case_studies_singlemem.csv"):
                 y_ret_in=y_ret_in,
                 is_counter_current=is_counter_current
             )
-            reactor.solve(verbose=2, use_adaptive_react=False, dt_min=1e-2)
+            reactor.solve(verbose=2, dt_min=1e-2)
             # 5. Save Raw Data
             # Save configuration for reproducibility
             with open(os.path.join(out_dir, "config.json"), 'w') as f:

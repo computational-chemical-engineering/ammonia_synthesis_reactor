@@ -89,6 +89,10 @@ class SegregatedSolveResult:
             self.convergence_factor_p,
         )
 
+    def __iter__(self):
+        """Allow legacy tuple unpacking in diagnostics and ad hoc scripts."""
+        return iter(self.as_tuple())
+
 
 @dataclass
 class SteadyStateSolveStatus:
@@ -117,6 +121,7 @@ DEFAULT_CONTINUATION_CONFIG = ContinuationConfig()
 CFL_INIT = 0.1  # Initial CFL number for timestep selection
 EPS_CHEM_TIMESTEP = 1e-8  # Small epsilon for chemical timestep calculation
 MAX_DT_PER_STEP = 500.0  # Maximum temperature change per solve step [K]
+STEADY_STATE_DT = 1e10  # Large dt used to evaluate the steady-state residual
 
 # Line search parameters (from NewtonConfig defaults)
 ARMIJO_COEFF = DEFAULT_NEWTON_CONFIG.armijo_coeff
@@ -179,7 +184,7 @@ class MembraneReactor:
         self.last_solve_status = None
 
         dt_cfl = self._compute_dt_cfl(cfl=CFL_INIT)
-        self.solve(dt=dt_cfl, use_adaptive_react=False, num_timesteps=2)
+        self.solve(dt=dt_cfl, num_timesteps=2)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate attribute access to config and mesh for backwards compatibility.
@@ -1782,7 +1787,7 @@ class MembraneReactor:
         return g, jac_cond, cp_inv_mat
 
     def _solve_cpT(self, c_old, T_old, dt, verbose=0, use_line_search=False):
-        """Newton/line-search solve for species concentrations.
+        """Run the monolithic nonlinear correction for a fixed pseudo-time step.
 
         Args:
             c_old: Previous concentration field
@@ -1792,9 +1797,8 @@ class MembraneReactor:
             use_line_search: If True, use Armijo backtracking line search
 
         Returns:
-            tuple: (g_norm, g_norm_init, g_p_norm, g_p_norm_init, success)
+            SegregatedSolveResult with correction diagnostics.
         """
-        success = True
         cpT = self.cpT
         shape_cpT = cpT.shape
         ord = self.ord_norm
@@ -1821,94 +1825,120 @@ class MembraneReactor:
             g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
             return g
 
-        g_norm_init = None
-        g_p_norm_init = None
+        def run_local_correction():
+            success = True
+            g_norm_init = None
+            g_p_norm_init = None
 
-        for k in range(self.num_concentration_iterations):
-            try:
-                g, jac = self._construct_g_cpT(c_old, T_old, dt, compute_jac=True)
-            except RecoverableNumericalError as exc:
-                mark_retryable_failure(exc, stage="residual/Jacobian assembly")
-                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
-            g_norm, g_p_norm = compute_norms(g)
+            for k in range(self.num_concentration_iterations):
+                try:
+                    g, jac = self._construct_g_cpT(c_old, T_old, dt, compute_jac=True)
+                except RecoverableNumericalError as exc:
+                    mark_retryable_failure(exc, stage="residual/Jacobian assembly")
+                    return np.inf, g_norm_init, np.inf, g_p_norm_init, False
+                g_norm, g_p_norm = compute_norms(g)
 
-            if k == 0:
-                g_norm_init = g_norm
-                g_p_norm_init = g_p_norm
-
-            # Compute Newton step
-            try:
-                dcpT = -sla.spsolve(jac, g.reshape((-1, 1)))
-            except RuntimeError:
-                # Factorization failure (singular/ill-conditioned Jacobian).
-                # Return inf so the outer loop treats this as divergence
-                # and reduces dt.
-                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
-            # MatrixRankWarning path: spsolve may return NaN without raising.
-            if not np.all(np.isfinite(dcpT)):
-                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
-            self.cnt_num_solves_cpT += 1
-
-            # Apply step with optional line search
-            if use_line_search:
-                # Use armijo_line_search from solvers.py
-                def norm_fn(g_arr):
-                    g_c, g_p = compute_norms(g_arr.reshape(shape_cpT))
-                    return max(g_c, g_p)  # Combined norm for line search
+                if k == 0:
+                    g_norm_init = g_norm
+                    g_p_norm_init = g_p_norm
 
                 try:
-                    x_new, g_new_norm, alpha, ls_success = armijo_line_search(
-                        x=cpT_vec.copy(),
-                        dx=dcpT,
-                        g_norm=max(g_norm, g_p_norm),
-                        residual_fn=lambda x: eval_residual(x).ravel(),
-                        norm_fn=norm_fn,
-                        armijo_coeff=ARMIJO_COEFF,
-                        min_alpha=MIN_LINE_SEARCH_ALPHA,
-                    )
-                except RecoverableNumericalError as exc:
-                    mark_retryable_failure(exc, stage="line search residual evaluation")
+                    dcpT = -sla.spsolve(jac, g.reshape((-1, 1)))
+                except RuntimeError:
                     return np.inf, g_norm_init, np.inf, g_p_norm_init, False
-                cpT_vec[:] = x_new
+                if not np.all(np.isfinite(dcpT)):
+                    return np.inf, g_norm_init, np.inf, g_p_norm_init, False
+                self.cnt_num_solves_cpT += 1
 
-                if not ls_success:
-                    success = False
-                    if verbose > 0:
-                        warnings.warn(
-                            f"Line search failed at iteration {k}: "
-                            f"residual {g_new_norm:.2e}",
-                            RuntimeWarning,
+                if use_line_search:
+                    def norm_fn(g_arr):
+                        g_c, g_p = compute_norms(g_arr.reshape(shape_cpT))
+                        return max(g_c, g_p)
+
+                    try:
+                        x_new, g_new_norm, alpha, ls_success = armijo_line_search(
+                            x=cpT_vec.copy(),
+                            dx=dcpT,
+                            g_norm=max(g_norm, g_p_norm),
+                            residual_fn=lambda x: eval_residual(x).ravel(),
+                            norm_fn=norm_fn,
+                            armijo_coeff=ARMIJO_COEFF,
+                            min_alpha=MIN_LINE_SEARCH_ALPHA,
                         )
-            else:
-                # Full Newton step (no line search)
-                cpT_vec[:] = cpT_vec + dcpT
+                    except RecoverableNumericalError as exc:
+                        mark_retryable_failure(exc, stage="line search residual evaluation")
+                        return np.inf, g_norm_init, np.inf, g_p_norm_init, False
+                    cpT_vec[:] = x_new
 
-            # Enforce physical bounds to prevent NaN propagation
-            # Note: Concentrations are allowed to go negative during Newton iterations
-            # The kinetics use safe power functions that handle negative values
-            # Temperature must be positive and within reasonable bounds
-            # cpT[..., -1] = np.clip(cpT[..., -1], 200.0, 2000.0)
-            # Pressure must be positive
-            # cpT[..., -2] = np.maximum(cpT[..., -2], 1e3)
+                    if not ls_success:
+                        success = False
+                        if verbose > 0:
+                            warnings.warn(
+                                f"Line search failed at iteration {k}: "
+                                f"residual {g_new_norm:.2e}",
+                                RuntimeWarning,
+                            )
+                else:
+                    cpT_vec[:] = cpT_vec + dcpT
 
-            # Update velocity fields after step
-            self._update_velocity_fields(p=cpT[..., -2])
+                self._update_velocity_fields(p=cpT[..., -2])
 
-            # Recompute residual norms for convergence check
-            try:
-                g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
-            except RecoverableNumericalError as exc:
-                mark_retryable_failure(exc, stage="post-step residual evaluation")
-                return np.inf, g_norm_init, np.inf, g_p_norm_init, False
-            g_norm, g_p_norm = compute_norms(g)
+                try:
+                    g, _ = self._construct_g_cpT(c_old, T_old, dt, compute_jac=False)
+                except RecoverableNumericalError as exc:
+                    mark_retryable_failure(exc, stage="post-step residual evaluation")
+                    return np.inf, g_norm_init, np.inf, g_p_norm_init, False
+                g_norm, g_p_norm = compute_norms(g)
 
-            # Check convergence
-            if g_norm < max(self.rtol_c * g_norm_init, self.atol_c) and g_p_norm < max(
-                self.rtol_p * g_p_norm_init, self.atol_p
-            ):
-                break
+                if g_norm < max(self.rtol_c * g_norm_init, self.atol_c) and g_p_norm < max(
+                    self.rtol_p * g_p_norm_init, self.atol_p
+                ):
+                    break
 
-        return g_norm, g_norm_init, g_p_norm, g_p_norm_init, success
+            return g_norm, g_norm_init, g_p_norm, g_p_norm_init, success
+
+        g_norm_init = None
+        g_p_norm_init = None
+        g_norm = np.inf
+        g_p_norm = np.inf
+        success = False
+
+        for j in range(self.num_newton_iterations):
+            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success = run_local_correction()
+            logger.debug("Newton iteration %d: g_norm = %.4e", j, g_norm)
+
+            if j == 0:
+                g_norm_init = g_norm_start
+                g_p_norm_init = g_p_norm_start
+
+            if (not np.isfinite(g_norm)) or (g_norm_init is not None and g_norm > 10 * g_norm_init):
+                return SegregatedSolveResult(
+                    converged=False,
+                    num_iterations=j + 1,
+                    g_norm=g_norm,
+                    g_p_norm=g_p_norm,
+                    g_norm_init=g_norm_init,
+                    g_p_norm_init=g_p_norm_init,
+                )
+
+            if g_norm < max(self.rtol * g_norm_init, self.atol):
+                return SegregatedSolveResult(
+                    converged=success,
+                    num_iterations=j + 1,
+                    g_norm=g_norm,
+                    g_p_norm=g_p_norm,
+                    g_norm_init=g_norm_init,
+                    g_p_norm_init=g_p_norm_init,
+                )
+
+        return SegregatedSolveResult(
+            converged=success,
+            num_iterations=self.num_newton_iterations,
+            g_norm=g_norm,
+            g_p_norm=g_p_norm,
+            g_norm_init=g_norm_init,
+            g_p_norm_init=g_p_norm_init,
+        )
 
     def _compute_dt_cfl(self, cfl=CFL_INIT):
         """Return minimum time step avoiding CFL condition violation."""
@@ -1932,80 +1962,58 @@ class MembraneReactor:
         dt_chem_min = np.min(dt_chem_local)
         return dt_chem_min
 
+    def _compute_steady_state_residual(self):
+        """Evaluate the steady-state residual on the current reactor state."""
+        c_current = self.cpT[..., :-2].copy()
+        T_current = self.cpT[..., -1].copy()
+        g_ss, _ = self._construct_g_cpT(
+            c_current,
+            T_current,
+            STEADY_STATE_DT,
+            compute_jac=False,
+        )
+        return g_ss
+
+    def _compute_steady_state_norm(self):
+        """Return the norm of the steady-state residual on the current state."""
+        return np.linalg.norm(self._compute_steady_state_residual())
+
+    def _refresh_transport_state(self, c=None, T=None, p=None):
+        """Rebuild transport operators and velocity fields for the given state."""
+        self._construct_darcy_matrices(c=c, T=T, p=p)
+        pressure = self.cpT[..., -2] if p is None else p
+        self._update_velocity_fields(p=pressure)
+
+    def _restore_state(self, cpT_state):
+        """Restore a saved state and refresh derived transport fields."""
+        self.cpT = cpT_state.copy()
+        self._refresh_transport_state(p=self.cpT[..., -2])
+
     def _solve_step(
         self,
         c_old: NDArray[np.float64],
         T_old: NDArray[np.float64],
         dt: float,
     ) -> SegregatedSolveResult:
-        """Perform segregated Newton iterations for fixed reaction factor.
-
-        This is the "corrector" part of the continuation scheme, solving
-        the coupled concentration-pressure and temperature equations.
-
-        Args:
-            c_old: Previous concentration field (num_z, num_r, num_c).
-            T_old: Previous temperature field (num_z, num_r).
-            dt: Pseudo-time step size.
-
-        Returns:
-            SegregatedSolveResult with convergence info.
-        """
-        g_norm_init = None
-        g_p_norm_init = None
-        success = False
-
-        for j in range(self.num_newton_iterations):
-            # Solve concentration-pressure system
-            g_norm, g_norm_start, g_p_norm, g_p_norm_start, success = (
-                self._solve_cpT(c_old, T_old, dt)
-            )
-            logger.debug("Newton iteration %d: g_norm = %.4e", j, g_norm)
-
-            if j == 0:
-                g_norm_init = g_norm_start
-                g_p_norm_init = g_p_norm_start
-
-            # Check for divergence
-            if ~np.isfinite(g_norm) or (g_norm > 10 * g_norm_init):
-                return SegregatedSolveResult(
-                    converged=False,
-                    num_iterations=j + 1,
-                    g_norm=g_norm,
-                    g_p_norm=g_p_norm,
-                    g_norm_init=g_norm_init,
-                    g_p_norm_init=g_p_norm_init,
-                )
-
-            # Check convergence
-            if g_norm < max(self.rtol * g_norm_init, self.atol):
-                return SegregatedSolveResult(
-                    converged=success,
-                    num_iterations=j + 1,
-                    g_norm=g_norm,
-                    g_p_norm=g_p_norm,
-                    g_norm_init=g_norm_init,
-                    g_p_norm_init=g_p_norm_init,
-                )
-
-        # Max iterations reached - return last success status
-        return SegregatedSolveResult(
-            converged=success,  # Original code returned success, not False
-            num_iterations=self.num_newton_iterations,
-            g_norm=g_norm,
-            g_p_norm=g_p_norm,
-            g_norm_init=g_norm_init,
-            g_p_norm_init=g_p_norm_init,
-        )
+        """Compatibility wrapper for the monolithic correction solve."""
+        return self._solve_cpT(c_old, T_old, dt)
 
     def solve(
         self,
         num_timesteps: Optional[int] = None,
+        dt: Optional[float] = None,
         dt_init: Optional[float] = None,
+        dt_min: Optional[float] = None,
+        dt_max: Optional[float] = None,
+        dt_increase_factor: Optional[float] = None,
+        dt_decrease_factor: Optional[float] = None,
+        adaptive_dt_threshold: Optional[float] = None,
         use_adaptive_dt: bool = True,
-        steady_state_tol: float = 1e-3,
-        n_plateau_required: int = 20,
-        plateau_tol: float = 0.02,
+        steady_state_atol: Optional[float] = None,
+        steady_state_rtol: Optional[float] = None,
+        steady_state_tol: Optional[float] = None,
+        n_plateau_required: Optional[int] = None,
+        plateau_tol: Optional[float] = None,
         verbose: int = 0,
         return_status: bool = False,
         **kwargs: Any,
@@ -2019,32 +2027,101 @@ class MembraneReactor:
 
         Args:
             num_timesteps: Maximum number of pseudo-transient steps.
-            dt_init: Initial time step. Defaults to self.dt_init.
+            dt: Fixed pseudo-time step size. When provided, adaptive dt is disabled.
+            dt_init: Initial adaptive time step. Defaults to self.dt_init.
+            dt_min: Minimum adaptive time step override for this solve call.
+            dt_max: Maximum adaptive time step override for this solve call.
+            dt_increase_factor: Adaptive dt growth factor override.
+            dt_decrease_factor: Adaptive dt shrink factor override.
+            adaptive_dt_threshold: Residual reduction threshold for increasing dt.
             use_adaptive_dt: If True, adapt dt based on convergence quality.
-            steady_state_tol: Relative tolerance for steady-state detection.
+            steady_state_atol: Absolute tolerance on ||g_ss||.
+            steady_state_rtol: Relative tolerance on ||g_ss|| referenced to the
+                first accepted steady-state residual.
+            steady_state_tol: Deprecated compatibility alias for
+                steady_state_rtol.
             verbose: Verbosity level (0=silent, 1=summary, 2=detailed).
             return_status: If True, return a structured solve-status object.
-            **kwargs: Additional arguments passed to solve methods.
+            **kwargs: Unsupported keyword arguments. Raises TypeError.
 
         Returns:
             True/False by default, or a SteadyStateSolveStatus when return_status=True.
         """
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs))
+            raise TypeError(f"solve() got unexpected keyword argument(s): {unknown}")
+
         if num_timesteps is None:
             num_timesteps = self.num_timesteps
-        if dt_init is None:
+        if dt is not None and dt_init is not None:
+            raise ValueError("Provide either dt or dt_init, not both.")
+
+        if dt is not None:
+            dt_init = dt
+            use_adaptive_dt = False
+        elif dt_init is None:
             dt_init = getattr(self, 'dt_init', 1e-3)
 
         self.cnt_num_solves_cpT = 0
         dt = dt_init
-        dt_min = getattr(self, 'dt_min', 1e-16)
-        dt_max = getattr(self, 'dt_max', 1e3)
-        dt_increase = getattr(self, 'dt_increase_factor', 2.0)
-        dt_decrease = getattr(self, 'dt_decrease_factor', 0.5)
-        threshold = getattr(self, 'adaptive_dt_threshold', 0.5)
+        dt_min = getattr(self, 'dt_min', 1e-16) if dt_min is None else dt_min
+        dt_max = getattr(self, 'dt_max', 1e3) if dt_max is None else dt_max
+        dt_increase = (
+            getattr(self, 'dt_increase_factor', 2.0)
+            if dt_increase_factor is None
+            else dt_increase_factor
+        )
+        dt_decrease = (
+            getattr(self, 'dt_decrease_factor', 0.5)
+            if dt_decrease_factor is None
+            else dt_decrease_factor
+        )
+        threshold = (
+            getattr(self, 'adaptive_dt_threshold', 0.5)
+            if adaptive_dt_threshold is None
+            else adaptive_dt_threshold
+        )
+        if steady_state_tol is not None and steady_state_rtol is not None:
+            raise ValueError(
+                "Provide either steady_state_rtol or steady_state_tol, not both."
+            )
+
+        steady_state_atol = (
+            getattr(self, 'steady_state_atol', 0.0)
+            if steady_state_atol is None
+            else steady_state_atol
+        )
+        steady_state_rtol = (
+            steady_state_tol
+            if steady_state_tol is not None
+            else (
+                getattr(self, 'steady_state_rtol', 1e-3)
+                if steady_state_rtol is None
+                else steady_state_rtol
+            )
+        )
+        n_plateau_required = (
+            getattr(self, 'n_plateau_required', 20)
+            if n_plateau_required is None
+            else n_plateau_required
+        )
+        plateau_tol = (
+            getattr(self, 'plateau_tol', 0.02)
+            if plateau_tol is None
+            else plateau_tol
+        )
+        if steady_state_atol < 0.0:
+            raise ValueError("steady_state_atol must be non-negative.")
+        if steady_state_rtol is not None and steady_state_rtol < 0.0:
+            raise ValueError("steady_state_rtol must be non-negative when provided.")
+        if steady_state_atol == 0.0 and steady_state_rtol is None:
+            raise ValueError(
+                "Enable at least one steady-state convergence criterion."
+            )
         self.last_solver_failure_message = None
 
         g_ss_norm_prev = None
-        g_ss_norm_0 = None   # initial SS residual, used for relative convergence
+        g_ss_norm_0 = None   # first accepted SS residual, used for relative convergence
         g_ss_norm = None
         g_ss_norm_best = None   # lowest g_ss seen — best physical state
         cpT_best = None
@@ -2073,10 +2150,7 @@ class MembraneReactor:
         # (e.g. when dt_init is too large and the Newton step jumps to a
         # non-physical region without producing NaN).
         try:
-            g_baseline, _ = self._construct_g_cpT(
-                self.cpT[..., :-2].copy(), self.cpT[..., -1].copy(), 1e10, compute_jac=False
-            )
-            g_ss_norm_baseline  = np.linalg.norm(g_baseline)
+            g_ss_norm_baseline = self._compute_steady_state_norm()
         except RecoverableNumericalError as exc:
             self.last_solver_failure_message = f"initial steady-state residual evaluation failed: {exc}"
             if verbose >= 1:
@@ -2087,20 +2161,33 @@ class MembraneReactor:
             print(f"Starting adaptive dt solve: dt_init={dt_init:.2e}, "
                   f"dt_range=[{dt_min:.2e}, {dt_max:.2e}]")
 
+        def check_steady_state_convergence(current_norm: float):
+            abs_ok = steady_state_atol > 0.0 and current_norm <= steady_state_atol
+            rel_ok = (
+                steady_state_rtol is not None
+                and g_ss_norm_0 is not None
+                and current_norm / g_ss_norm_0 <= steady_state_rtol
+            )
+            criteria = []
+            if steady_state_atol > 0.0:
+                criteria.append(abs_ok)
+            if steady_state_rtol is not None:
+                criteria.append(rel_ok)
+            is_ok = bool(criteria) and all(criteria)
+            return is_ok, abs_ok, rel_ok
+
         for i in range(num_timesteps):
             T_old = self.cpT[..., -1].copy()
             c_old = self.cpT[..., :-2].copy()
             cpT_backup = self.cpT.copy()
 
             # Attempt solve with current dt
-            result = self._solve_step(c_old, T_old, dt)
+            result = self._solve_cpT(c_old, T_old, dt)
             g_norm = result.g_norm
 
             # --- Reject if factorization/NaN failure (g_norm=inf) ---
             if not np.isfinite(g_norm):
-                self.cpT = cpT_backup
-                self._construct_darcy_matrices()
-                self._update_velocity_fields(self.cpT[..., -2])
+                self._restore_state(cpT_backup)
                 dt = max(dt * dt_decrease, dt_min)
                 n_plateau_steps = 0
                 if verbose >= 2:
@@ -2109,19 +2196,13 @@ class MembraneReactor:
                 continue
 
             # Compute actual steady-state residual (without transient term)
-            # dt=1e10 makes the transient term (c-c_old)/dt negligible.
-            # Note: _construct_g_cpT reads self.cpT directly for concentrations/pressure/T;
-            # the c_old/T_old args only affect the negligible transient term at dt=1e10.
             try:
-                g_ss, _ = self._construct_g_cpT(c_old, T_old, 1e10, compute_jac=False)
-                g_ss_norm = np.linalg.norm(g_ss)
+                g_ss_norm = self._compute_steady_state_norm()
             except RecoverableNumericalError as exc:
                 self.last_solver_failure_message = (
                     f"steady-state residual evaluation failed at dt={dt:.2e}: {exc}"
                 )
-                self.cpT = cpT_backup
-                self._construct_darcy_matrices()
-                self._update_velocity_fields(self.cpT[..., -2])
+                self._restore_state(cpT_backup)
                 dt = max(dt * dt_decrease, dt_min)
                 n_plateau_steps = 0
                 if verbose >= 2:
@@ -2134,9 +2215,7 @@ class MembraneReactor:
             # have been updated by many Picard steps. These are incomparable measurements
             # and the comparison causes spurious step-0 rejection even for tiny dt.
             if g_ss_norm_prev is not None and g_ss_norm > 10 * g_ss_norm_prev:
-                self.cpT = cpT_backup
-                self._construct_darcy_matrices()
-                self._update_velocity_fields(self.cpT[..., -2])
+                self._restore_state(cpT_backup)
                 dt = max(dt * dt_decrease, dt_min)
                 n_increasing = 0
                 n_plateau_steps = 0
@@ -2156,7 +2235,7 @@ class MembraneReactor:
             if g_ss_norm_0 is None:
                 g_ss_norm_0 = max(g_ss_norm, 1e-30)
 
-            # Adapt dt based on steady-state residual progress, and track plateau
+            # Adapt dt based on steady-state residual progress, and track plateau.
             if use_adaptive_dt and g_ss_norm_prev is not None:
                 reduction = g_ss_norm / g_ss_norm_prev
 
@@ -2189,8 +2268,8 @@ class MembraneReactor:
                               f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
 
                 # Track plateau: sole authority on n_plateau_steps.
-                # |reduction - 1| < plateau_tol means the residual is essentially
-                # stationary — the Picard fixed point has been reached.
+                # |reduction - 1| < plateau_tol means the steady-state residual is
+                # essentially stationary.
                 if abs(reduction - 1.0) < plateau_tol:
                     n_plateau_steps += 1
                 else:
@@ -2198,8 +2277,7 @@ class MembraneReactor:
 
                 # If consistently drifting away from best, restore best state.
                 if n_increasing >= 10 and cpT_best is not None:
-                    self.cpT = cpT_best.copy()
-                    self._update_velocity_fields(self.cpT[..., -2])
+                    self._restore_state(cpT_best)
                     g_ss_norm = g_ss_norm_best
                     g_ss_norm_prev = g_ss_norm_best
                     n_increasing = 0
@@ -2210,34 +2288,37 @@ class MembraneReactor:
             elif verbose >= 2:
                 print(f"  Step {i}: dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}")
 
-            # Check steady-state convergence.
-            rel_residual = g_ss_norm / g_ss_norm_0
-
-            # Relative-reduction criterion — only valid once dt is in the large-dt regime,
-            # to prevent false convergence while the pseudo-transient term still dominates.
-            if rel_residual < steady_state_tol and dt >= 0.1 * dt_max:
+            is_converged, abs_ok, rel_ok = check_steady_state_convergence(g_ss_norm)
+            rel_residual = None if g_ss_norm_0 is None else g_ss_norm / g_ss_norm_0
+            if is_converged:
                 is_converged = True
                 if verbose >= 1:
-                    print(f"  Step {i}: CONVERGED, dt={dt:.2e}, "
-                          f"||g_ss||={g_ss_norm:.2e}, ||g_ss||/||g_ss_0||={rel_residual:.2e}")
+                    message = f"  Step {i}: CONVERGED, dt={dt:.2e}, ||g_ss||={g_ss_norm:.2e}"
+                    if steady_state_atol > 0.0:
+                        message += (
+                            f", abs={'yes' if abs_ok else 'no'}"
+                            f" (target {steady_state_atol:.2e})"
+                        )
+                    if rel_residual is not None and steady_state_rtol is not None:
+                        message += (
+                            f", rel={rel_residual:.2e}"
+                            f" (target {steady_state_rtol:.2e})"
+                        )
+                    print(message)
                 break
 
-            # Plateau criterion — Picard fixed point: best achievable with one Picard
-            # step per Newton iteration. Declare convergence once stable at large dt.
-            if n_plateau_steps >= n_plateau_required and dt >= 0.1 * dt_max:
-                is_converged = True
-                if verbose >= 1:
-                    print(f"  Step {i}: CONVERGED (Picard plateau), dt={dt:.2e}, "
-                          f"||g_ss||={g_ss_norm:.2e}, ||g||={g_norm:.2e}")
-                break
+            if verbose >= 2 and n_plateau_steps == n_plateau_required:
+                print(
+                    f"  Step {i}: STAGNATING, dt={dt:.2e}, "
+                    f"||g_ss||={g_ss_norm:.2e}, plateau_steps={n_plateau_steps}"
+                )
 
             g_ss_norm_prev = g_ss_norm
 
         # Always restore the best (lowest g_ss) state found, even if the final
         # state drifted away from it after the minimum.
         if cpT_best is not None and (g_ss_norm is None or g_ss_norm_best < g_ss_norm):
-            self.cpT = cpT_best
-            self._update_velocity_fields(self.cpT[..., -2])
+            self._restore_state(cpT_best)
             g_ss_norm = g_ss_norm_best
             if verbose >= 1:
                 print(f"  Restored best state: ||g_ss_best||={g_ss_norm_best:.2e}")
@@ -2309,16 +2390,14 @@ class MembraneReactor:
                 self.kinetics.set_T_and_p(
                     T=self.cpT[..., -1][:, self.num_r_perm :], p=self.cpT[:, self.num_r_perm :, -2]
                 )
-                self._construct_darcy_matrices()
-                self._update_velocity_fields(p=self.cpT[..., -2])
+                self._refresh_transport_state(p=self.cpT[..., -2])
             elif not is_first_step:
                 # Use a zero-order predictor (the last solution) for the first step
                 self.cpT = cpT_prev.copy()
                 self.kinetics.set_T_and_p(
                     T=self.cpT[..., -1][:, self.num_r_perm :], p=self.cpT[:, self.num_r_perm :, -2]
                 )
-                self._construct_darcy_matrices()
-                self._update_velocity_fields(p=self.cpT[..., -2])
+                self._refresh_transport_state(p=self.cpT[..., -2])
 
             # --- Corrector Step ---
             if verbose > 1:
@@ -2327,7 +2406,7 @@ class MembraneReactor:
                     self.factor_react,
                     dfactor_react,
                 )
-            result = self._solve_step(c_old, T_old, dt)
+            result = self._solve_cpT(c_old, T_old, dt)
             num_iters = result.num_iterations
             g_norm, g_p_norm = result.g_norm, result.g_p_norm
             is_converged = result.converged
@@ -2454,7 +2533,7 @@ class MembraneReactor:
         is_converged = False
         while t < t_final or not is_converged:
             try:
-                result = self._solve_step(c_old, T_old, dt)
+                result = self._solve_cpT(c_old, T_old, dt)
                 is_converged = result.converged
                 is_converging = is_converged
             except RecoverableNumericalError as exc:
@@ -2474,14 +2553,12 @@ class MembraneReactor:
                 elif t >= t_final:
                     break
                 else:
-                    self.cpT = cpT_prev.copy()
+                    self._restore_state(cpT_prev)
                     dt = max(dt * dt_factor_decrease, dt_min)
                     self.kinetics.set_T_and_p(
                         T=self.cpT[..., -1][:, self.num_r_perm :],
                         p=self.cpT[:, self.num_r_perm :, -2],
                     )
-                    self._construct_darcy_matrices()
-                    self._update_velocity_fields(p=self.cpT[..., -2])
                     if verbose > 1:
                         if self.last_solver_failure_message is not None:
                             logger.info("Reduced dt to %.4e after %s", dt, self.last_solver_failure_message)

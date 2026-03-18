@@ -142,7 +142,7 @@ def run_case_studies(csv_path="debug.csv"):
             converged = reactor.solve(
                 num_timesteps=500,
                 use_adaptive_dt=True,
-                steady_state_tol=1e-4,
+                steady_state_rtol=1e-4,
                 verbose=1
             )
             print(f"Converged: {converged}, Newton solves: {reactor.cnt_num_solves_cpT}")

@@ -71,6 +71,10 @@ class ReactorConfig:
     dt_increase_factor: float = 2.0
     dt_decrease_factor: float = 0.5
     adaptive_dt_threshold: float = 0.5
+    steady_state_atol: float = 0.0
+    steady_state_rtol: Optional[float] = 1e-3
+    n_plateau_required: int = 20
+    plateau_tol: float = 0.02
     num_timesteps: int = 10
     num_newton_iterations: int = 1
     num_pressure_iterations: int = 5
