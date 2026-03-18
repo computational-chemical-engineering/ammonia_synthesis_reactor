@@ -32,6 +32,7 @@ from ammonia_synthesis_kinetics import AmmoniaSynthesisKinetics
 from config import ReactorConfig
 from gas_mixture_correlations import GasMixtureCorrelations
 from mesh import ReactorMesh
+from membrane_reactor_extras import LegacyAdaptiveSolveMixin
 from physics import (
     BC_DIRICHLET,
     BC_DIRICHLET_HOM,
@@ -128,7 +129,7 @@ ARMIJO_COEFF = DEFAULT_NEWTON_CONFIG.armijo_coeff
 MIN_LINE_SEARCH_ALPHA = DEFAULT_NEWTON_CONFIG.min_line_search_alpha
 
 
-class MembraneReactor:
+class MembraneReactor(LegacyAdaptiveSolveMixin):
     """2D axisymmetric membrane reactor model.
 
     Simulates coupled mass, momentum, and (optionally) energy transport with
@@ -2680,15 +2681,3 @@ class MembraneReactor:
         flow_vol_perm = self.F_perm_in * self.Rg * self.T_perm_in / self.p_perm_out
         logger.info("Residence time retentate side: %.4f s", vol_ret / flow_vol_ret)
         logger.info("Residence time permeate side: %.4f s", vol_perm / flow_vol_perm)
-
-
-from membrane_reactor_extras import (
-    _compute_dt_chem_min,
-    _solve_adaptive_dt,
-    _solve_step,
-)
-
-
-MembraneReactor._compute_dt_chem_min = _compute_dt_chem_min
-MembraneReactor._solve_step = _solve_step
-MembraneReactor._solve_adaptive_dt = _solve_adaptive_dt
