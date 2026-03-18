@@ -1949,19 +1949,6 @@ class MembraneReactor:
         dt_cfl = cfl * dz_cell / u_max
         return dt_cfl
 
-    def _compute_dt_chem_min(self):
-        """Return minimum explicit chemical time step avoiding negative c."""
-        c_ret = self.cpT[:, self.num_r_perm :, :-2]
-        _, T_ret = self._split_perm_and_ret(self.cpT[..., -1])
-        _, p_ret = self._split_perm_and_ret(self.cpT[..., -2])
-        rates = self.kinetics(self._reaction_partial_pressures(c_ret, T_ret, p_ret), T_ret)
-        eps = EPS_CHEM_TIMESTEP
-        dt_chem_local = np.where(
-            rates < 0, np.maximum(c_ret, eps) / (-rates + eps), np.inf
-        )
-        dt_chem_min = np.min(dt_chem_local)
-        return dt_chem_min
-
     def _compute_steady_state_residual(self):
         """Evaluate the steady-state residual on the current reactor state."""
         c_current = self.cpT[..., :-2].copy()
@@ -1988,15 +1975,6 @@ class MembraneReactor:
         """Restore a saved state and refresh derived transport fields."""
         self.cpT = cpT_state.copy()
         self._refresh_transport_state(p=self.cpT[..., -2])
-
-    def _solve_step(
-        self,
-        c_old: NDArray[np.float64],
-        T_old: NDArray[np.float64],
-        dt: float,
-    ) -> SegregatedSolveResult:
-        """Compatibility wrapper for the monolithic correction solve."""
-        return self._solve_cpT(c_old, T_old, dt)
 
     def solve(
         self,
@@ -2482,92 +2460,6 @@ class MembraneReactor:
                 )
         return is_converged
 
-    def _solve_adaptive_dt(
-        self,
-        dt,
-        c_old,
-        T_old,
-        dt_init=None,
-        dt_min=None,
-        dt_max=None,
-        dt_factor_increase=1.2,
-        dt_factor_decrease=0.5,
-        verbose=0,
-    ):
-        """Solve using adaptive pseudo-time stepping.
-
-        Integrates from t=0 to t=dt using adaptive step sizes. Step size
-        increases after successful convergence and decreases after failure.
-
-        Args:
-            dt: Target pseudo-time to integrate to (final time).
-            c_old: Previous concentration field for transient term.
-            T_old: Previous temperature field for transient term.
-            dt_init: Initial step size. Defaults to min of chemical timescale and dt.
-            dt_min: Minimum step size before giving up. Defaults to 0.2*dt_chem.
-            dt_max: Maximum step size. Defaults to dt.
-            dt_factor_increase: Step size multiplier after success (default 1.2).
-            dt_factor_decrease: Step size multiplier after failure (default 0.5).
-            verbose: Verbosity level (0=quiet, 1=warnings, 2=progress).
-
-        Returns:
-            True if converged, False otherwise.
-        """
-        # --- Initialization ---
-        dt_chem = None
-        if dt_init is None:
-            dt_chem = self._compute_dt_chem_min()
-            dt_init = min(dt_chem, dt)
-        if dt_min is None:
-            if dt_chem is None:
-                dt_chem = self._compute_dt_chem_min()
-            dt_min = min(0.2 * dt_chem, dt_init, dt)
-        if dt_max is None:
-            dt_max = max(dt_init, dt)
-        t_final = dt
-        dt = dt_init
-
-        # History for predictor step (current, previous)
-        cpT_prev = self.cpT.copy()
-        t = 0.0
-        is_converged = False
-        while t < t_final or not is_converged:
-            try:
-                result = self._solve_cpT(c_old, T_old, dt)
-                is_converged = result.converged
-                is_converging = is_converged
-            except RecoverableNumericalError as exc:
-                self.last_solver_failure_message = f"adaptive dt step failed at dt={dt:.2e}: {exc}"
-                is_converging = False
-            except Exception:
-                is_converging = False
-            if is_converging:
-                cpT_prev = self.cpT.copy()
-                t += dt
-                dt = min(t + dt * dt_factor_increase, t + dt_max, t_final) - t
-                if verbose > 1:
-                    logger.info("Increasing timestep to dt = %.4e, t = %.4e", dt, t)
-            else:
-                if dt <= dt_min:
-                    break
-                elif t >= t_final:
-                    break
-                else:
-                    self._restore_state(cpT_prev)
-                    dt = max(dt * dt_factor_decrease, dt_min)
-                    self.kinetics.set_T_and_p(
-                        T=self.cpT[..., -1][:, self.num_r_perm :],
-                        p=self.cpT[:, self.num_r_perm :, -2],
-                    )
-                    if verbose > 1:
-                        if self.last_solver_failure_message is not None:
-                            logger.info("Reduced dt to %.4e after %s", dt, self.last_solver_failure_message)
-                        else:
-                            logger.info("Reduced dt to %.4e", dt)
-        if verbose > 1 and not is_converged:
-            logger.warning("Failed: could not converge at t = %.4e", t)
-        return is_converged
-
     def _compute_fluxes_diff(self, c=None, T=None, p=None):
         """Compute diffusive + permeation species fluxes (axis & radial)."""
         shape_c_ret = (self.num_z, self.num_r_ret, self.num_c)
@@ -2788,3 +2680,15 @@ class MembraneReactor:
         flow_vol_perm = self.F_perm_in * self.Rg * self.T_perm_in / self.p_perm_out
         logger.info("Residence time retentate side: %.4f s", vol_ret / flow_vol_ret)
         logger.info("Residence time permeate side: %.4f s", vol_perm / flow_vol_perm)
+
+
+from membrane_reactor_extras import (
+    _compute_dt_chem_min,
+    _solve_adaptive_dt,
+    _solve_step,
+)
+
+
+MembraneReactor._compute_dt_chem_min = _compute_dt_chem_min
+MembraneReactor._solve_step = _solve_step
+MembraneReactor._solve_adaptive_dt = _solve_adaptive_dt
