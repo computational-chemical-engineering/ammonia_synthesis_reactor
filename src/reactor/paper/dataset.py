@@ -145,9 +145,54 @@ def _collect(resolution_name: str, include_598k: str) -> tuple[list[tuple[Path, 
     else:
         missing.append("inputs/")
 
-    want(settings.project_root() / "LICENSE", Path("LICENSE"))
-
     return pairs, missing
+
+
+def _license_text() -> str:
+    """The archive's own licence file.
+
+    Not the repository's: the code is MIT, the data is
+    :data:`~reactor.archive.DATASET_LICENSE`. The file also carves out
+    the third-party measurements, which are not ours to relicense.
+    """
+    authors = "; ".join(a["name"] for a in archive.AUTHORS)
+    return f"""\
+{archive.DATASET_LICENSE} — {archive.DATASET_TITLE}
+
+Copyright (c) 2026 {authors}, Eindhoven University of Technology.
+
+This dataset is licensed under the Creative Commons Attribution 4.0
+International License ({archive.DATASET_LICENSE}). You are free to share and adapt
+the material for any purpose, including commercially, provided you give
+appropriate credit, link to the licence, and indicate if changes were
+made.
+
+Full licence text: {archive.DATASET_LICENSE_URL}legalcode
+Summary:           {archive.DATASET_LICENSE_URL}
+
+Attribution: cite the dataset by its DOI, and the accompanying paper for
+the science. See README.md for the identifiers.
+
+TWO EXCEPTIONS — third-party measurements we redistribute but do not own,
+and therefore cannot license to you:
+
+  inputs/ammonia_synthesis_data_rossetti_et_al.csv
+      Experimental values transcribed from I. Rossetti, N. Pernicone,
+      F. Ferrero, L. Forni, "Kinetic study of ammonia synthesis on a
+      promoted Ru/C catalyst", Ind. Eng. Chem. Res. 45 (2006) 4150-4155,
+      https://doi.org/10.1021/ie051398g
+
+  inputs/s1_diffusivity_chapman.csv
+      Diffusivities digitized from the third-party source cited in the
+      paper's supplementary material.
+
+Both are included only so the validation figures are reproducible. Their
+reuse is governed by the rights of the original publishers; cite those
+publications for the measurements.
+
+The source code that produced this dataset is separately licensed under
+the {archive.CODE_LICENSE} License — see the repository named in README.md.
+"""
 
 
 def _compute_provenance(out_root: Path) -> dict[str, Any]:
@@ -218,7 +263,8 @@ of the accompanying paper.
 - Paper DOI: {ids['paper_doi'] or '(pending — in review)'}
 - Exported: {manifest['created_utc']} from commit `{manifest['provenance'].get('git_commit', '?')[:8]}`
 - Contents: {manifest['n_files']} files, resolution tier `{manifest['resolution']}`
-- Licence: MIT (see `LICENSE`)
+- Licence: {archive.DATASET_LICENSE} (see `LICENSE`); the source code is
+  separately {archive.CODE_LICENSE}
 
 ## What is here
 
@@ -335,8 +381,8 @@ digitized from the source cited in the paper's supplementary material.
 Both are included solely so the validation figures are reproducible:
 please cite those original publications for the measurements, not this
 dataset. Everything else here — all simulation output, the property
-database and the permeation measurements — is our own, under the MIT
-licence in `LICENSE`.
+database and the permeation measurements — is our own, released under
+{archive.DATASET_LICENSE} (see `LICENSE`).
 """
 
 
@@ -420,6 +466,7 @@ def export(
     # The descriptor a stranger reads first; not in the manifest, because
     # it is written from it.
     (out_root / README_NAME).write_text(_readme_text(manifest))
+    (out_root / "LICENSE").write_text(_license_text())
     report["manifest"] = str(out_root / MANIFEST_NAME)
     report["readme"] = str(out_root / README_NAME)
     return report

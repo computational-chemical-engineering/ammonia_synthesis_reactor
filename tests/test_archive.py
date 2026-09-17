@@ -82,6 +82,34 @@ def test_authors_and_orcids_match_citation_cff_and_zenodo():
         assert zen["orcid"] == author["orcid"]
 
 
+def test_code_and_dataset_licences_are_distinct_and_consistent():
+    """The code is MIT, the archived data is CC BY — keep them straight.
+
+    The repository LICENSE and .zenodo.json must state the *code* licence;
+    the dataset's own LICENSE (generated at export) states the data one.
+    Conflating them is the failure mode this guards.
+    """
+    from reactor.paper import dataset
+
+    assert archive.CODE_LICENSE == "MIT"
+    assert archive.DATASET_LICENSE.startswith("CC BY")
+    # 4TU's table: 1 = CC BY 4.0, 2 = CC0, 3 = MIT. Off-by-one here would
+    # deposit under the wrong terms silently.
+    assert archive.DATASET_LICENSE_4TU_ID == 1
+
+    assert json.loads((CITATION.parent / ".zenodo.json").read_text())["license"] \
+        == archive.CODE_LICENSE
+    assert _citation()["license"] == archive.CODE_LICENSE
+    assert (CITATION.parent / "LICENSE").read_text().lstrip().startswith("MIT")
+
+    data_licence = dataset._license_text()
+    assert archive.DATASET_LICENSE in data_licence
+    assert archive.DATASET_LICENSE_URL in data_licence
+    # the third-party carve-out must survive any rewording
+    assert "rossetti" in data_licence.lower()
+    assert "chapman" in data_licence.lower()
+
+
 def test_related_identifiers_grow_with_the_dois(monkeypatch):
     assert archive.related_identifiers() == [] or archive.DATASET_DOI or archive.PAPER_DOI
 

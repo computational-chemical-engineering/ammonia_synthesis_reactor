@@ -61,6 +61,16 @@ DATASET_ZIP_URL: str | None = None
 DATASET_TITLE = ("Two-dimensional model of an ammonia synthesis packed bed "
                  "membrane reactor: simulation dataset")
 
+#: Licences. The split is the usual one: the source code is MIT, the
+#: archived data carries a data licence. 4TU's own licence table puts MIT
+#: under ``type=software`` and CC BY under ``type=data``, so a dataset
+#: deposit wants the latter. Careful with 4TU's numeric ids — ``2`` is
+#: CC0, not MIT.
+CODE_LICENSE = "MIT"
+DATASET_LICENSE = "CC BY 4.0"
+DATASET_LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
+DATASET_LICENSE_4TU_ID = 1
+
 #: Archive hosting the dataset.
 DATASET_REPOSITORY = "4TU.ResearchData"
 
