@@ -27,6 +27,18 @@ from __future__ import annotations
 
 from typing import Any
 
+#: Authors of the code and the dataset, in citation order. Mirrored in
+#: ``CITATION.cff`` and ``.zenodo.json``; the dataset descriptor reads
+#: them from here so a deposited archive names its authors.
+AUTHORS = (
+    {"name": "Gargiulo, Iolanda",
+     "orcid": "0009-0003-2508-6373",
+     "affiliation": "Eindhoven University of Technology"},
+    {"name": "Peters, E. A. J. F.",
+     "orcid": "0000-0001-6099-3583",
+     "affiliation": "Eindhoven University of Technology"},
+)
+
 #: Public source repository.
 CODE_REPOSITORY = "https://github.com/computational-chemical-engineering/ammonia_synthesis_reactor"
 

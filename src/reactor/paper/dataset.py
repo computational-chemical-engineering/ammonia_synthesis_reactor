@@ -192,6 +192,8 @@ def _readme_text(manifest: dict[str, Any]) -> str:
     """
     ids = manifest["identifiers"]
     n_cases = manifest.get("n_cases_per_model", "?")
+    authors = "; ".join(f"{a['name']} (ORCID {a['orcid']})"
+                        for a in archive.AUTHORS)
     dataset_doi = ids["dataset_doi"] or "(pending — assigned on deposit)"
     code_doi = ids["code_doi"] or "(pending)"
     commits = manifest.get("compute_provenance", {}).get("commits", {})
@@ -208,6 +210,8 @@ membrane reactor for ammonia synthesis over a Ru/C catalyst, together
 with the one-dimensional models compared against them and every figure
 of the accompanying paper.
 
+- Authors: {authors}
+- Affiliation: Eindhoven University of Technology
 - Dataset DOI: {dataset_doi}
 - Source code: {ids['code_repository']}
 - Code archive DOI: {code_doi}

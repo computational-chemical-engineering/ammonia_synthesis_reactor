@@ -6,6 +6,7 @@ deposit that updates only one of them is worse than no DOI at all.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,26 @@ def test_citation_block_names_pending_archives():
             assert "pending" in text
         else:
             assert archive.doi_url(doi) in text
+
+
+def test_every_author_has_an_orcid():
+    for author in archive.AUTHORS:
+        assert author["orcid"], author["name"]
+
+
+def test_authors_and_orcids_match_citation_cff_and_zenodo():
+    """One author list, three files that must agree on it."""
+    cff_authors = _citation()["authors"]
+    zenodo = json.loads((CITATION.parent / ".zenodo.json").read_text())
+
+    assert len(cff_authors) == len(archive.AUTHORS) == len(zenodo["creators"])
+    for author, cff, zen in zip(archive.AUTHORS, cff_authors, zenodo["creators"]):
+        family, given = author["name"].split(", ")
+        assert cff["family-names"] == family
+        assert cff["given-names"] == given
+        assert zen["name"] == author["name"]
+        assert cff["orcid"].endswith(author["orcid"])
+        assert zen["orcid"] == author["orcid"]
 
 
 def test_citation_cff_agrees_with_archive_module():

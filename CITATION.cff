@@ -10,7 +10,7 @@ authors:
   - family-names: Peters
     given-names: E. A. J. F.
     affiliation: "Eindhoven University of Technology"
-    # ORCID pending: add as orcid: "https://orcid.org/0000-000X-XXXX-XXXX"
+    orcid: "https://orcid.org/0000-0001-6099-3583"
 version: 1.1.0
 date-released: 2026-09-17
 license: MIT
