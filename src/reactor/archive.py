@@ -49,7 +49,7 @@ CODE_DOI: str | None = None
 CODE_VERSION_DOI: str | None = None
 
 #: 4TU.ResearchData DOI of the archived dataset.
-DATASET_DOI: str | None = None
+DATASET_DOI: str | None = "10.4121/e03a6e99-6ddc-4c10-8d92-fb36335cdb43"
 
 #: Direct download URL of the dataset archive (a zip holding one
 #: top-level ``dataset/``). 4TU serves these from its file API; the

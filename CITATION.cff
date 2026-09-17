@@ -30,6 +30,16 @@ abstract: >-
   accompanying paper. The package includes a fitted Sherwood correction
   and a mechanistic, reaction-screened closure for the concentration
   polarization at the membrane wall.
+references:
+  - type: data
+    title: "Two-dimensional model of an ammonia synthesis packed bed membrane reactor: simulation dataset"
+    doi: "10.4121/e03a6e99-6ddc-4c10-8d92-fb36335cdb43"
+    authors:
+      - family-names: Gargiulo
+        given-names: Iolanda
+      - family-names: Peters
+        given-names: E. A. J. F.
+
 # DOIs are filled in at deposit time and mirrored in src/reactor/archive.py
 # (tests/test_archive.py pins the two together):
 #   - identifiers: the Zenodo code-archive DOI (concept + this version)

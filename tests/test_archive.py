@@ -147,6 +147,8 @@ def test_citation_cff_agrees_with_archive_module():
     if archive.CODE_DOI is not None:
         assert archive.CODE_DOI in dois or cff.get("doi") == archive.CODE_DOI
     if archive.DATASET_DOI is not None:
-        related = {r.get("value") for r in cff.get("references", [])
+        # CFF 1.2.0 spells a reference's DOI as `doi:`, not `value:` —
+        # `value:` belongs to `identifiers:` entries.
+        related = {r.get("doi") for r in cff.get("references", [])
                    if isinstance(r, dict)}
         assert archive.DATASET_DOI in dois | related

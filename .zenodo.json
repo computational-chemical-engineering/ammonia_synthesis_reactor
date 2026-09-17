@@ -25,5 +25,13 @@
     "reactor modelling",
     "computational fluid dynamics"
   ],
-  "language": "eng"
+  "language": "eng",
+  "related_identifiers": [
+    {
+      "identifier": "10.4121/e03a6e99-6ddc-4c10-8d92-fb36335cdb43",
+      "relation": "isSourceOf",
+      "resource_type": "dataset",
+      "scheme": "doi"
+    }
+  ]
 }
