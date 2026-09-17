@@ -430,6 +430,15 @@ def export(
         shutil.copy2(src, dst)
         files[str(rel)] = {"sha256": _sha256(dst), "bytes": dst.stat().st_size}
 
+    # Generated, but the terms of reuse belong under the checksums like
+    # everything else. (README.md cannot be: it quotes the manifest, so it
+    # would have to contain its own hash — same reason manifest.json is
+    # excluded.)
+    license_path = out_root / "LICENSE"
+    license_path.write_text(_license_text())
+    files["LICENSE"] = {"sha256": _sha256(license_path),
+                        "bytes": license_path.stat().st_size}
+
     # Wall-time accounting from the 2D summary (the expensive half).
     runtime_s = None
     summary_path = settings.summary_csv(resolution_name, settings.MODEL_2D)
@@ -466,7 +475,6 @@ def export(
     # The descriptor a stranger reads first; not in the manifest, because
     # it is written from it.
     (out_root / README_NAME).write_text(_readme_text(manifest))
-    (out_root / "LICENSE").write_text(_license_text())
     report["manifest"] = str(out_root / MANIFEST_NAME)
     report["readme"] = str(out_root / README_NAME)
     return report
