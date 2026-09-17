@@ -55,7 +55,8 @@ DATASET_DOI: str | None = "10.4121/e03a6e99-6ddc-4c10-8d92-fb36335cdb43"
 #: top-level ``dataset/``). 4TU serves these from its file API; the
 #: landing page derived from :data:`DATASET_DOI` always works as a
 #: fallback for a human reader.
-DATASET_ZIP_URL: str | None = None
+DATASET_ZIP_URL: str | None = (
+    "https://data.4tu.nl/file/e03a6e99-6ddc-4c10-8d92-fb36335cdb43/59e9a4a2-e83b-4365-a646-6b371cbfb0cd")
 
 #: Title under which the dataset is deposited.
 DATASET_TITLE = ("Two-dimensional model of an ammonia synthesis packed bed "
