@@ -439,6 +439,10 @@ def export(
     files["LICENSE"] = {"sha256": _sha256(license_path),
                         "bytes": license_path.stat().st_size}
 
+    # The report describes the archive as written, not the copy list.
+    report["n_files"] = len(files)
+    report["total_bytes"] = int(sum(f["bytes"] for f in files.values()))
+
     # Wall-time accounting from the 2D summary (the expensive half).
     runtime_s = None
     summary_path = settings.summary_csv(resolution_name, settings.MODEL_2D)
