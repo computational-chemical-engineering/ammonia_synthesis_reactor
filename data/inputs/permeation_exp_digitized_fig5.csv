@@ -1,0 +1,23 @@
+# Experimental single-gas permeance of the CMS membrane, DIGITIZED from
+# the corresponding figure of the accompanying manuscript (embedded
+# image, pixel-calibrated against the axis ticks; estimated read-off
+# uncertainty ~2%). Superseded placeholder: the laboratory source table
+# is now available as permeation_exp_measured_fig5.csv, which the
+# pipeline uses. Kept only as the cross-check of record (the two agree
+# to <= 0.5% on every point). Digitized 2026-08-18.
+species,T_K,permeance_mol_m-2_s-1_Pa-1
+NH3,623,1.8847e-07
+NH3,573,1.9980e-07
+NH3,523,2.5686e-07
+NH3,473,3.0000e-07
+NH3,423,3.0000e-07
+N2,623,4.5943e-07
+N2,573,4.3937e-07
+N2,523,3.6871e-07
+N2,473,3.6701e-07
+N2,423,2.6589e-07
+H2,623,4.3174e-07
+H2,573,4.1042e-07
+H2,523,3.6123e-07
+H2,473,3.5097e-07
+H2,423,2.9895e-07

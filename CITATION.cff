@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it and the accompanying paper."
+title: "Ammonia synthesis membrane reactor: 2D axisymmetric model and paper pipeline"
+type: software
+authors:
+  - family-names: Gargiulo
+    given-names: Iolanda
+    affiliation: "Eindhoven University of Technology"
+    orcid: "https://orcid.org/0009-0003-2508-6373"
+  - family-names: Peters
+    given-names: E. A. J. F.
+    affiliation: "Eindhoven University of Technology"
+    # ORCID pending: add as orcid: "https://orcid.org/0000-000X-XXXX-XXXX"
+version: 1.1.0
+date-released: 2026-09-17
+license: MIT
+repository-code: "https://github.com/computational-chemical-engineering/ammonia_synthesis_reactor"
+keywords:
+  - ammonia synthesis
+  - membrane reactor
+  - packed bed reactor
+  - concentration polarization
+  - Sherwood correlation
+  - reactor modelling
+abstract: >-
+  A two-dimensional axisymmetric, non-isothermal model of a packed bed
+  membrane reactor for ammonia synthesis over a Ru/C catalyst, together
+  with the one-dimensional models it is compared against and the cached
+  pipeline that regenerates every figure and the archived dataset of the
+  accompanying paper. The package includes a fitted Sherwood correction
+  and a mechanistic, reaction-screened closure for the concentration
+  polarization at the membrane wall.
+# DOIs are filled in at deposit time and mirrored in src/reactor/archive.py
+# (tests/test_archive.py pins the two together):
+#   - identifiers: the Zenodo code-archive DOI (concept + this version)
+#   - references:  the 4TU.ResearchData dataset DOI
+#   - preferred-citation: the paper, once published

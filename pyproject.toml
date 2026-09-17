@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ammonia-synthesis-reactor"
+version = "1.1.0"
+description = "2D axisymmetric packed-bed membrane reactor model for ammonia synthesis, with the cached pipeline that generates the paper's figures and dataset"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+  "ammonia synthesis", "membrane reactor", "packed bed",
+  "concentration polarization", "reactor modelling", "Sherwood correlation",
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Chemistry",
+]
+authors = [
+  { name = "Iolanda Gargiulo" },
+  { name = "E.A.J.F. Peters" },
+]
+dependencies = [
+  "pymrm>=2.3.1",   # Python Package for Multiphase Reactor Modeling (PyPI)
+  "numpy",
+  "scipy",
+  "pandas",
+  "matplotlib",
+  "h5py",
+  "openpyxl",       # reads data/inputs/cases_to_run.xlsx, the G1-G8 case table
+]
+
+[project.optional-dependencies]
+notebooks = ["jupyter", "nbformat"]
+test = ["pytest"]
+
+[project.urls]
+Repository = "https://github.com/computational-chemical-engineering/ammonia_synthesis_reactor"
+
+[project.scripts]
+reactor-paper-sweep = "scripts.run_paper_sweep:main"
+
+[tool.setuptools]
+packages = ["reactor", "reactor.paper", "scripts"]
+
+[tool.setuptools.package-dir]
+reactor = "src/reactor"
+scripts = "scripts"
+
+[tool.setuptools.package-data]
+reactor = ["data/*.json"]

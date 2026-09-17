@@ -1,0 +1,33 @@
+# Byte-compiled / packaging
+__pycache__/
+*.py[cod]
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated outputs: the solver cache and figures (regenerate with the
+# notebooks / scripts.run_paper_sweep)
+results/
+tmp/
+*.log
+
+# Dataset export payload (published separately with a DOI, never in git)
+dataset/
+Dataset_paper/
+
+# Manuscript working copies
+*.docx
+~$*

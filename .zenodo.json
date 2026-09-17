@@ -1,0 +1,28 @@
+{
+  "title": "Ammonia synthesis membrane reactor: 2D axisymmetric model and paper pipeline",
+  "upload_type": "software",
+  "license": "MIT",
+  "version": "1.1.0",
+  "description": "<p>A two-dimensional axisymmetric, non-isothermal model of a packed bed membrane reactor for ammonia synthesis over a Ru/C catalyst, together with the one-dimensional models it is compared against and the cached pipeline that regenerates every figure and the archived dataset of the accompanying paper.</p><p>The package includes a fitted, Reynolds-independent Sherwood correction for the concentration polarization at the membrane wall, and a mechanistic reaction-screened closure that reproduces it from the local kinetics with a single order-one constant and no geometry fit. Notebooks re-render every figure from the archived dataset and run on Google Colab.</p>",
+  "creators": [
+    {
+      "name": "Gargiulo, Iolanda",
+      "affiliation": "Eindhoven University of Technology",
+      "orcid": "0009-0003-2508-6373"
+    },
+    {
+      "name": "Peters, E. A. J. F.",
+      "affiliation": "Eindhoven University of Technology"
+    }
+  ],
+  "keywords": [
+    "ammonia synthesis",
+    "membrane reactor",
+    "packed bed reactor",
+    "concentration polarization",
+    "Sherwood correlation",
+    "reactor modelling",
+    "computational fluid dynamics"
+  ],
+  "language": "eng"
+}

@@ -1,0 +1,48 @@
+# Binary NH3-H2 diffusivity, DIGITIZED BY US from the figures of a
+# third-party publication cited in the accompanying paper as "Chapman et
+# al."; the values are reproduced here only so the comparison in SI
+# Figure S.1 is reproducible. Cite the original publication for these
+# measurements, not this file. Digitization by I. Gargiulo, 2026-08-25.
+# Conditions: the pressure panel at ~273 K, the temperature panel at
+# ~1 atm (identified by our own Chapman-Enskog evaluation reproducing
+# the points to <1% for trace NH3 in pure H2).
+# Columns: panel ("P" = pressure panel, "T" = temperature panel),
+# series ("Chapman" = experimental points, "Correlation" = the
+# correlation curve digitized from the same source figure, kept as a
+# cross-check of the pipeline's GasMixtureCorrelations), p_bar, T_K,
+# D_m2_s.
+panel,series,p_bar,T_K,D_m2_s
+T,Chapman,,273.51,7.78E-05
+T,Chapman,,373.257,1.33E-04
+T,Chapman,,427.637,1.70E-04
+T,Chapman,,482.003,2.09E-04
+T,Chapman,,536.368,2.49E-04
+T,Chapman,,590.71,2.94E-04
+T,Chapman,,645.95,3.41E-04
+T,Chapman,,699.353,3.92E-04
+T,Correlation,,272.601,7.78E-05
+T,Correlation,,373.252,1.34E-04
+T,Correlation,,427.637,1.70E-04
+T,Correlation,,481.998,2.10E-04
+T,Correlation,,536.349,2.53E-04
+T,Correlation,,592.489,3.02E-04
+T,Correlation,,645.902,3.52E-04
+T,Correlation,,697.491,4.02E-04
+P,Chapman,1.061,,7.79E-05
+P,Chapman,2.051,,3.90E-05
+P,Chapman,6.717,,1.16E-05
+P,Chapman,11.313,,6.65E-06
+P,Chapman,16.051,,4.50E-06
+P,Chapman,20.788,,3.65E-06
+P,Chapman,25.242,,3.00E-06
+P,Chapman,30.051,,2.57E-06
+P,Chapman,34.859,,2.14E-06
+P,Correlation,1.061,,7.79E-05
+P,Correlation,2.051,,3.90E-05
+P,Correlation,6.717,,1.16E-05
+P,Correlation,11.313,,6.65E-06
+P,Correlation,16.051,,4.50E-06
+P,Correlation,20.788,,3.65E-06
+P,Correlation,25.242,,3.00E-06
+P,Correlation,30.051,,2.57E-06
+P,Correlation,34.859,,2.14E-06
