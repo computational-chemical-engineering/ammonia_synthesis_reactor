@@ -101,6 +101,34 @@ def dataset_zip_url() -> str:
     return DATASET_ZIP_URL
 
 
+#: DataCite relation each sibling archive bears *from the code record's
+#: point of view*. The code generated the dataset (``isSourceOf``, whose
+#: inverse ``isDerivedFrom`` is what the 4TU record should carry back),
+#: and both support the article (``isSupplementTo``).
+_RELATIONS = {
+    "dataset": ("isSourceOf", "dataset"),
+    "paper": ("isSupplementTo", "publication-article"),
+}
+
+
+def related_identifiers() -> list[dict[str, str]]:
+    """The ``related_identifiers`` block for ``.zenodo.json``.
+
+    Only identifiers that exist are emitted, so this can be pasted at any
+    stage of the deposit and simply grows as DOIs are minted.
+    ``tests/test_archive.py`` asserts ``.zenodo.json`` matches it, which
+    is what stops the cross-links from being half-done.
+    """
+    out: list[dict[str, str]] = []
+    for doi, key in ((DATASET_DOI, "dataset"), (PAPER_DOI, "paper")):
+        if not doi:
+            continue
+        relation, resource_type = _RELATIONS[key]
+        out.append({"identifier": doi, "relation": relation,
+                    "resource_type": resource_type, "scheme": "doi"})
+    return out
+
+
 def identifiers() -> dict[str, Any]:
     """The identifier block stamped into the dataset manifest."""
     return {

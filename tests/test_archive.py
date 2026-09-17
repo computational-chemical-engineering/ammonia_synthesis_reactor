@@ -82,6 +82,33 @@ def test_authors_and_orcids_match_citation_cff_and_zenodo():
         assert zen["orcid"] == author["orcid"]
 
 
+def test_related_identifiers_grow_with_the_dois(monkeypatch):
+    assert archive.related_identifiers() == [] or archive.DATASET_DOI or archive.PAPER_DOI
+
+    monkeypatch.setattr(archive, "DATASET_DOI", "10.4121/xyz")
+    monkeypatch.setattr(archive, "PAPER_DOI", "10.1016/j.example.2026.01.001")
+    rel = {r["identifier"]: r["relation"] for r in archive.related_identifiers()}
+    assert rel == {"10.4121/xyz": "isSourceOf",
+                   "10.1016/j.example.2026.01.001": "isSupplementTo"}
+
+
+def test_zenodo_json_carries_the_cross_links_once_minted():
+    """The archives must point at each other, not just exist.
+
+    Skipped while every sibling DOI is pending; the moment one is set in
+    archive.py this fails until .zenodo.json names it, which is what keeps
+    the dataset/code/paper links from being half-wired.
+    """
+    expected = archive.related_identifiers()
+    if not expected:
+        pytest.skip("no sibling DOI minted yet")
+    zenodo = json.loads((CITATION.parent / ".zenodo.json").read_text())
+    have = {r["identifier"]: r["relation"]
+            for r in zenodo.get("related_identifiers", [])}
+    for entry in expected:
+        assert have.get(entry["identifier"]) == entry["relation"], entry
+
+
 def test_citation_cff_agrees_with_archive_module():
     """CITATION.cff must carry the same identifiers, once they exist."""
     cff = _citation()
