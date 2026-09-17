@@ -167,14 +167,14 @@ in shells and prefer `pathlib` when scripting.
 See `CITATION.cff`, or run `python -c "from reactor import archive;
 print(archive.citation())"`. Please cite the accompanying paper for the
 science and this repository (or the archived dataset DOI) for the
-implementation and data. Three identifiers are **pending** and will be
-added to `src/reactor/archive.py`, `CITATION.cff`, `.zenodo.json` and
-this section as soon as they exist:
+implementation and data.
 
-- the reference to the accompanying paper (not yet published),
-- the archived-dataset DOI (4TU.ResearchData deposit not yet made),
-- the code-archive DOI (Zenodo, minted automatically from the GitHub
-  release once the repository is public).
+- **Code archive** (Zenodo): <https://doi.org/10.5281/zenodo.22811033> —
+  the concept DOI, which always resolves to the latest release. Release
+  v1.1.0 is <https://doi.org/10.5281/zenodo.22811034>.
+- **Dataset** (4TU.ResearchData):
+  <https://doi.org/10.4121/e03a6e99-6ddc-4c10-8d92-fb36335cdb43>, CC BY 4.0.
+- **Paper** — DOI pending; it will be added here on publication.
 
 ## License
 

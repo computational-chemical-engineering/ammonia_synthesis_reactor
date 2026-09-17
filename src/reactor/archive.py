@@ -43,10 +43,10 @@ AUTHORS = (
 CODE_REPOSITORY = "https://github.com/computational-chemical-engineering/ammonia_synthesis_reactor"
 
 #: Zenodo *concept* DOI — resolves to the latest archived release.
-CODE_DOI: str | None = None
+CODE_DOI: str | None = "10.5281/zenodo.22811033"
 
 #: Zenodo DOI of this specific release.
-CODE_VERSION_DOI: str | None = None
+CODE_VERSION_DOI: str | None = "10.5281/zenodo.22811034"
 
 #: 4TU.ResearchData DOI of the archived dataset.
 DATASET_DOI: str | None = "10.4121/e03a6e99-6ddc-4c10-8d92-fb36335cdb43"
